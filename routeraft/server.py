@@ -10,11 +10,12 @@ from __future__ import annotations
 import json
 import re
 import urllib.error
+import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib import resources
 
-from . import parsers
+from . import parsers, singbox
 from .config import Store
 from .supervisor import Supervisor
 
@@ -72,11 +73,12 @@ def make_handler(store: Store, sup: Supervisor):
                 return self._send(200, html.encode(), "text/html")
             if path == "/api/state":
                 return self._send(200, {"state": store.public(), "status": sup.status()})
-            m = re.fullmatch(r"/api/delay/([\w.\-]+)", path)
+            m = re.fullmatch(r"/api/delay/(.+)", path)
             if m:
-                return self._send(200, sup.delay(m.group(1)))
+                member = singbox.member_for(store.data, urllib.parse.unquote(m.group(1)))
+                return self._send(200, sup.delay(member))
             if path == "/api/logs":
-                return self._send(200, {"singbox": sup.logs("sing-box"), "corp": sup.logs("corp")})
+                return self._send(200, {k: sup.logs(k) for k in ("sing-box", "vpn", "corp")})
             self._send(404, {"error": "not found"})
 
         def do_POST(self):
@@ -91,7 +93,7 @@ def make_handler(store: Store, sup: Supervisor):
         def do_DELETE(self):
             if not self._guard(True):
                 return
-            m = re.fullmatch(r"/api/exits/([\w.\-]+)", self.path)
+            m = re.fullmatch(r"/api/exits/([\w.\-:]+)", self.path)
             if not m:
                 return self._send(404, {"error": "not found"})
             store.remove_exit(m.group(1))
@@ -109,22 +111,37 @@ def make_handler(store: Store, sup: Supervisor):
                 s["routes"] = b["routes"]
                 store.save()
                 return sup.apply()
+            if path == "/api/confirm":
+                return sup.confirm()
             if path == "/api/import/wireguard":
-                e = parsers.parse_wireguard(b["text"], b.get("name") or "wireguard")
-                ids = store.add_exits([e])
+                ids = sup.import_wireguard(b["text"], b.get("name") or "wireguard", b.get("provider") or "manual")
                 return {"ok": True, "ids": ids, **sup.apply()}
+            if path == "/api/import/ovpn":
+                eid = sup.import_ovpn(b["text"], b.get("name") or "openvpn", b.get("provider") or "")
+                return {"ok": True, "ids": [eid], **sup.apply()}
+            if path == "/api/import/path":  # folder / zip / file on this machine
+                return sup.import_path(b["path"], b.get("provider") or "")
             if path == "/api/import/subscription":
-                text = b.get("text")
-                if not text:
-                    with urllib.request.urlopen(b["url"], timeout=30) as r:
-                        text = r.read().decode("utf-8", "replace")
-                exits = parsers.parse_subscription(text)
-                if not exits:
-                    return {"ok": False, "error": "no vless nodes found"}
-                for old in [i for i, e in s["exits"].items() if e["type"] == "vless"]:
-                    s["exits"].pop(old)  # a subscription refresh replaces its nodes
-                ids = store.add_exits(exits)
-                return {"ok": True, "ids": ids, **sup.apply()}
+                sid = parsers.slug(b.get("id") or b.get("name") or "sub")
+                return sup.import_subscription(sid, b.get("name") or sid, b.get("url") or "", b.get("text") or "")
+            if path == "/api/subscription/refresh":
+                sub = s["subscriptions"][b["id"]]
+                return sup.import_subscription(b["id"], sub["name"], sub["url"])
+            if path == "/api/providers":
+                if b["provider"] not in s["providers"]:
+                    return {"ok": False, "error": "unknown provider"}
+                prov = s["providers"][b["provider"]]
+                prov["username"] = b.get("username", prov["username"])
+                if "password" in b:  # blank field in the UI means "keep the saved one"
+                    prov["password"] = b["password"]
+                store.save()
+                return {"ok": True}
+            if path == "/api/favorites":
+                s["favorites"] = [i for i in b["ids"] if i in s["exits"]]
+                store.save()
+                return sup.apply()
+            if path == "/api/exits/purge":
+                return {"ok": True, "removed": store.remove_provider_exits(b["provider"]), **sup.apply()}
             if path == "/api/corp":
                 c = s["corp"]
                 for k in ("enabled", "ovpn_path", "auth_file", "server", "server_port", "dns"):
