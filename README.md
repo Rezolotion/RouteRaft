@@ -109,4 +109,4 @@ Pre-release (v0.2). Core, parsers, config compiler, web UI and unit tests are co
 
 ## License
 
-To be decided.
+[MIT](LICENSE)
