@@ -28,8 +28,8 @@ def which(name: str) -> str | None:
 
 
 class Supervisor:
-    def __init__(self, store: Store, dry_run: bool = False):
-        self.store, self.dry_run = store, dry_run
+    def __init__(self, store: Store, dry_run: bool = False, keep_services: bool = False):
+        self.store, self.dry_run, self.keep_services = store, dry_run, keep_services  # keep_services: never stop conflicting services
         self.sb: subprocess.Popen | None = None
         self.vpn: subprocess.Popen | None = None      # active OpenVPN *global* exit
         self.vpn_exit: str = ""
@@ -149,7 +149,7 @@ class Supervisor:
                 return {"ok": False, "error": "sing-box is not installed (packaging/install-singbox.sh)"}
             if os.geteuid() != 0:
                 return {"ok": False, "error": "need root to create the TUN device (run the daemon as a service)"}
-            for svc in self.store.data["settings"]["stop_conflicting"]:
+            for svc in ([] if self.keep_services else self.store.data["settings"]["stop_conflicting"]):
                 if subprocess.run(["systemctl", "is-active", "--quiet", svc]).returncode == 0:
                     subprocess.run(["systemctl", "stop", svc])
                     self.stopped_services.append(svc)

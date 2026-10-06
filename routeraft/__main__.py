@@ -18,6 +18,7 @@ def main(argv=None) -> int:
     sub = ap.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("serve", help="run the daemon + web UI")
     s.add_argument("--dry-run", action="store_true", help="never touch the network; only write configs")
+    s.add_argument("--keep-services", action="store_true", help="do not stop settings.stop_conflicting services on connect")
     sub.add_parser("build", help="print the generated sing-box config (contains secrets)")
     i = sub.add_parser("import-path", help="import a folder / .zip / file of .ovpn and WireGuard .conf")
     i.add_argument("path")
@@ -34,7 +35,7 @@ def main(argv=None) -> int:
     a = ap.parse_args(argv)
 
     store = Store(Path(a.state_dir))
-    sup = Supervisor(store, dry_run=getattr(a, "dry_run", False))
+    sup = Supervisor(store, dry_run=getattr(a, "dry_run", False), keep_services=getattr(a, "keep_services", False))
 
     if a.cmd == "serve":
         sup.startup_cleanup()
