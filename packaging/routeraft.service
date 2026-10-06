@@ -1,0 +1,16 @@
+[Unit]
+Description=RouteRaft split-tunnel manager (sing-box)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/routeraft
+ExecStart=/usr/bin/python3 -m routeraft --state-dir /var/lib/routeraft serve
+Restart=on-failure
+# Web UI is on 127.0.0.1 only; the daemon needs root for TUN + openvpn.
+StateDirectory=routeraft
+StateDirectoryMode=0700
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,274 @@
+<!doctype html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RouteRaft</title>
+<style>
+  :root {
+    --bg:#0f1115; --panel:#171a21; --panel2:#1e222b; --line:#2a2f3a; --text:#e7eaf0; --dim:#8b93a3;
+    --blue:#2d8cff; --green:#35d07f; --red:#c8443f; --amber:#e5b13a;
+  }
+  :root[data-theme="light"] { --bg:#f3f5f9; --panel:#fff; --panel2:#eef1f6; --line:#d5dae3; --text:#1b2030; --dim:#5f6a7e; }
+  @media (prefers-color-scheme: light) { :root:not([data-theme="dark"]) { --bg:#f3f5f9; --panel:#fff; --panel2:#eef1f6; --line:#d5dae3; --text:#1b2030; --dim:#5f6a7e; } }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:15px/1.6 Vazirmatn, Tahoma, system-ui, sans-serif; }
+  main { max-width:920px; margin:0 auto; padding:20px 16px 60px; }
+  header { display:flex; align-items:center; gap:12px; margin-bottom:18px; }
+  header h1 { font-size:20px; margin:0; flex:1; }
+  .dot { width:10px; height:10px; border-radius:50%; background:var(--dim); display:inline-block; margin-inline-end:6px; }
+  .dot.on { background:var(--green); box-shadow:0 0 8px var(--green); }
+  .badge { font-size:12px; color:var(--dim); }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:16px; margin-bottom:16px; }
+  .card h2 { font-size:15px; margin:0 0 12px; color:var(--dim); font-weight:600; }
+
+  /* diagram: user -> exit -> destination */
+  .lane { display:grid; grid-template-columns:84px 1fr 84px 1fr 150px; align-items:center; margin:12px 0; direction:ltr; }
+  .node { background:var(--panel2); border:1px solid var(--line); border-radius:12px; min-height:68px; display:flex; flex-direction:column;
+          align-items:center; justify-content:center; text-align:center; padding:6px; font-size:12px; direction:rtl; }
+  .node .ico { font-size:24px; line-height:1.2; }
+  .wire { height:3px; background:var(--blue); border-radius:2px; opacity:.9; }
+  .wire.off { background:var(--line); }
+  .wire.direct { background:var(--green); }
+  .wire.corp { background:var(--amber); }
+  .exitbox { direction:rtl; display:flex; flex-direction:column; gap:6px; align-items:stretch; padding:0 6px; }
+  select, input[type=text], textarea { width:100%; background:var(--panel2); color:var(--text); border:1px solid var(--line);
+          border-radius:8px; padding:7px 9px; font:inherit; }
+  textarea { min-height:70px; resize:vertical; direction:ltr; text-align:left; font-family:ui-monospace,monospace; font-size:12px; }
+  .ping { font-size:12px; color:var(--green); text-align:center; }
+  .ping.bad { color:var(--red); }
+  .dest { direction:rtl; }
+  .dest small { color:var(--dim); display:block; }
+
+  button { font:inherit; border:0; border-radius:10px; padding:8px 14px; cursor:pointer; background:var(--panel2); color:var(--text); border:1px solid var(--line); }
+  button:hover { border-color:var(--blue); }
+  button.primary { background:var(--blue); color:#fff; border-color:var(--blue); }
+  button.stop { background:var(--red); color:#fff; border-color:var(--red); }
+  button.big { padding:12px 40px; font-size:16px; }
+  .center { display:flex; justify-content:center; margin-top:8px; gap:10px; }
+
+  .route { border:1px solid var(--line); border-radius:12px; padding:12px; margin-bottom:10px; background:var(--panel2); }
+  .route .top { display:flex; gap:10px; align-items:center; margin-bottom:8px; }
+  .route .top input[type=text] { flex:1; }
+  .route .top select { width:auto; min-width:140px; }
+  .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+  label.f { display:block; font-size:12px; color:var(--dim); margin-bottom:3px; }
+  .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+  .msg { min-height:22px; font-size:13px; margin-top:8px; white-space:pre-wrap; direction:ltr; text-align:left; }
+  .msg.err { color:var(--red); } .msg.ok { color:var(--green); }
+  details summary { cursor:pointer; color:var(--dim); }
+  pre { background:var(--panel2); padding:10px; border-radius:8px; max-height:240px; overflow:auto; font-size:12px; direction:ltr; text-align:left; }
+  @media (max-width:640px){ .lane{grid-template-columns:60px 1fr 1fr; row-gap:8px} .lane .dest,.lane .w2{grid-column:span 3} .grid2{grid-template-columns:1fr} }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>RouteRaft</h1>
+    <span class="badge"><span id="dot" class="dot"></span><span id="stext">…</span></span>
+  </header>
+
+  <div class="card" id="diagram">
+    <h2>مسیرها</h2>
+    <div class="lane">
+      <div class="node"><span class="ico">💻</span>لپ‌تاپ</div>
+      <div class="wire" id="w-global"></div>
+      <div class="node"><span class="ico">☁️</span>خروجی</div>
+      <div class="wire" id="w-global2"></div>
+      <div class="dest node"><span class="ico">🌍</span>بقیه اینترنت<small>خروجی انتخابی</small></div>
+    </div>
+    <div class="center" style="margin:-4px 0 6px">
+      <div class="exitbox" style="width:min(360px,100%)">
+        <select id="globalSel" aria-label="خروجی سراسری"></select>
+        <div class="ping" id="ping"></div>
+      </div>
+    </div>
+    <div class="lane">
+      <div class="node"><span class="ico">💻</span>لپ‌تاپ</div>
+      <div class="wire direct" id="w-ir"></div>
+      <div class="node"><span class="ico">🏠</span>مستقیم</div>
+      <div class="wire direct" id="w-ir2"></div>
+      <div class="dest node"><span class="ico">🇮🇷</span>سایت‌های ایرانی<small>آی‌پی ایران</small></div>
+    </div>
+    <div class="lane">
+      <div class="node"><span class="ico">💻</span>لپ‌تاپ</div>
+      <div class="wire corp" id="w-corp"></div>
+      <div class="node"><span class="ico">🏢</span>OpenVPN شرکت<small id="corpState"></small></div>
+      <div class="wire corp" id="w-corp2"></div>
+      <div class="dest node"><span class="ico">🛠</span>ابزار شرکت<small>دامنه/آی‌پی‌های مشخص</small></div>
+    </div>
+    <div class="center">
+      <button id="btnConn" class="primary big">وصل شو</button>
+    </div>
+    <div class="msg" id="connMsg"></div>
+  </div>
+
+  <div class="card">
+    <h2>نقشه‌ی روتینگ (به ترتیب از بالا، اولین تطابق برنده است)</h2>
+    <div id="routes"></div>
+    <div class="row"><button id="addRoute">+ قانون جدید</button><button id="saveRoutes" class="primary">ذخیره و اعمال</button></div>
+    <div class="msg" id="routeMsg"></div>
+  </div>
+
+  <div class="card">
+    <h2>خروجی‌ها</h2>
+    <div id="exits" class="badge"></div>
+    <hr style="border:0;border-top:1px solid var(--line);margin:14px 0">
+    <div class="grid2">
+      <div>
+        <label class="f">وایرگارد (سرف‌شارک / ویندسکرایب) – محتوای فایل .conf</label>
+        <input type="text" id="wgName" placeholder="نام، مثلاً Surfshark-DE" style="margin-bottom:6px">
+        <textarea id="wgText" placeholder="[Interface]&#10;PrivateKey = …"></textarea>
+        <div class="row" style="margin-top:6px"><button id="impWg">افزودن</button></div>
+      </div>
+      <div>
+        <label class="f">ساب‌سکریپشن V2Ray (VLESS) – لینک یا متن</label>
+        <input type="text" id="subUrl" placeholder="https://…" style="margin-bottom:6px">
+        <textarea id="subText" placeholder="یا لینک‌های vless:// را اینجا بچسبانید"></textarea>
+        <div class="row" style="margin-top:6px"><button id="impSub">وارد کردن (جایگزین نودهای قبلی)</button></div>
+      </div>
+    </div>
+    <div class="msg" id="impMsg"></div>
+  </div>
+
+  <div class="card">
+    <h2>اوپن‌وی‌پی‌ان شرکت</h2>
+    <div class="grid2">
+      <div><label class="f">مسیر فایل .ovpn</label><input type="text" id="cPath" dir="ltr"></div>
+      <div><label class="f">فایل نام‌کاربری/رمز (اختیاری، دو خط، مجوز 600)</label><input type="text" id="cAuth" dir="ltr"></div>
+      <div><label class="f">DNS شرکت (اختیاری)</label><input type="text" id="cDns" dir="ltr"></div>
+      <div><label class="f">&nbsp;</label><label><input type="checkbox" id="cOn"> فعال</label></div>
+    </div>
+    <div class="row" style="margin-top:10px"><button id="saveCorp" class="primary">ذخیره</button></div>
+    <div class="msg" id="corpMsg"></div>
+  </div>
+
+  <details class="card"><summary>لاگ‌ها</summary>
+    <button id="reloadLogs" style="margin:8px 0">بازخوانی</button>
+    <pre id="logs"></pre>
+  </details>
+</main>
+
+<script>
+const TOKEN = "__TOKEN__";
+const $ = id => document.getElementById(id);
+let S = null;           // {state, status}
+let routesDraft = null; // editable copy of routes
+
+function h(tag, props = {}, ...kids) {  // DOM builder; text only via textContent (names come from untrusted subscriptions)
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(props)) {
+    if (k === "class") el.className = v; else if (k.startsWith("on")) el[k] = v; else el.setAttribute(k, v);
+  }
+  for (const k of kids) el.append(k instanceof Node ? k : document.createTextNode(k ?? ""));
+  return el;
+}
+async function api(method, path, body) {
+  const r = await fetch(path, { method, headers: { "Content-Type": "application/json", "X-RouteRaft-Token": TOKEN },
+                                body: body === undefined ? undefined : JSON.stringify(body) });
+  return r.json();
+}
+function say(id, res, okText = "انجام شد") {
+  const el = $(id); el.className = "msg " + (res.ok === false ? "err" : "ok");
+  el.textContent = res.ok === false ? (res.error || "خطا") : (res.note || okText);
+}
+
+async function load() {
+  S = await (await fetch("/api/state")).json();
+  render();
+}
+
+function exitLabel(id, e) { return e ? `${e.name} · ${e.type}` : id; }
+
+function render() {
+  const { state, status } = S;
+  $("dot").className = "dot" + (status.running ? " on" : "");
+  $("stext").textContent = status.running ? "وصل است" : "قطع است" + (status.dry_run ? " (dry-run)" : "");
+  $("btnConn").textContent = status.running ? "قطع شو" : "وصل شو";
+  $("btnConn").className = "big " + (status.running ? "stop" : "primary");
+  for (const w of ["w-global", "w-global2", "w-ir", "w-ir2", "w-corp", "w-corp2"]) $(w).classList.toggle("off", !status.running);
+  $("corpState").textContent = !state.corp.enabled ? "غیرفعال" : status.corp_running ? "وصل" : "قطع";
+
+  // global dropdown
+  const sel = $("globalSel"); sel.replaceChildren();
+  const ids = Object.keys(state.exits).filter(i => ["wireguard", "vless"].includes(state.exits[i].type));
+  for (const i of ids) sel.append(h("option", { value: i }, exitLabel(i, state.exits[i])));
+  if (ids.filter(i => state.exits[i].type === "vless").length > 1) sel.append(h("option", { value: "auto-vless" }, "VLESS · خودکار (سریع‌ترین)"));
+  sel.append(h("option", { value: "direct" }, "بدون تونل (مستقیم)"));
+  sel.value = status.selected || state.global || "direct";
+
+  // exits list
+  const ex = $("exits"); ex.replaceChildren();
+  if (!Object.keys(state.exits).length) ex.append("هنوز خروجی‌ای اضافه نشده.");
+  for (const [i, e] of Object.entries(state.exits)) {
+    ex.append(h("div", { class: "row", style: "margin:4px 0" },
+      h("span", {}, `${e.name} · ${e.type} · ${e.server}`),
+      h("button", { onclick: async () => { if (confirm(`حذف ${e.name}؟`)) { await api("DELETE", `/api/exits/${encodeURIComponent(i)}`); load(); } } }, "حذف")));
+  }
+
+  // corp form (don't clobber while typing)
+  if (document.activeElement.closest?.(".card") !== $("cPath").closest(".card")) {
+    $("cPath").value = state.corp.ovpn_path; $("cAuth").value = state.corp.auth_file;
+    $("cDns").value = state.corp.dns; $("cOn").checked = state.corp.enabled;
+  }
+  if (!routesDraft) routesDraft = JSON.parse(JSON.stringify(state.routes));
+  renderRoutes();
+}
+
+const lines = v => v.split("\n").map(s => s.trim()).filter(Boolean);
+
+function renderRoutes() {
+  const box = $("routes"); box.replaceChildren();
+  const targets = [["global", "خروجی سراسری"], ["direct", "مستقیم (آی‌پی ایران)"], ["corp", "OpenVPN شرکت"],
+    ...Object.entries(S.state.exits).map(([i, e]) => [i, exitLabel(i, e)])];
+  routesDraft.forEach((r, idx) => {
+    const area = (key, label) => {
+      const t = h("textarea", { placeholder: label }); t.value = (r[key] || []).join("\n");
+      t.oninput = () => { r[key] = lines(t.value); };
+      return h("div", {}, h("label", { class: "f" }, label), t);
+    };
+    const name = h("input", { type: "text" }); name.value = r.name; name.oninput = () => { r.name = name.value; };
+    const on = h("input", { type: "checkbox" }); on.checked = r.enabled; on.onchange = () => { r.enabled = on.checked; };
+    const ex = h("select", {}); for (const [v, l] of targets) ex.append(h("option", { value: v }, l)); ex.value = r.exit; ex.onchange = () => { r.exit = ex.value; };
+    const del = h("button", { onclick: () => { routesDraft.splice(idx, 1); renderRoutes(); } }, "حذف");
+    const up = h("button", { onclick: () => { if (idx) { [routesDraft[idx-1], routesDraft[idx]] = [routesDraft[idx], routesDraft[idx-1]]; renderRoutes(); } } }, "↑");
+    box.append(h("div", { class: "route" },
+      h("div", { class: "top" }, on, name, ex, up, del),
+      h("div", { class: "grid2" },
+        area("domain_suffix", "پسوند دامنه (هر خط یکی، مثل .ir یا corp.example.com)"),
+        area("ip_cidr", "آی‌پی / CIDR (هر خط یکی)"),
+        area("domain", "دامنه‌ی دقیق"),
+        area("rule_set", "rule-set (geosite-ir, geoip-ir)"))));
+  });
+}
+
+$("addRoute").onclick = () => { routesDraft.push({ id: "r" + Date.now(), name: "قانون جدید", enabled: true, exit: "global",
+  domain_suffix: [], domain: [], ip_cidr: [], rule_set: [], process_name: [] }); renderRoutes(); };
+$("saveRoutes").onclick = async () => { say("routeMsg", await api("POST", "/api/routes", { routes: routesDraft }), "اعمال شد"); routesDraft = null; load(); };
+
+$("btnConn").onclick = async () => {
+  $("connMsg").textContent = "…"; $("connMsg").className = "msg";
+  const res = await api("POST", S.status.running ? "/api/disconnect" : "/api/connect");
+  say("connMsg", res); load();
+};
+$("globalSel").onchange = async e => { say("connMsg", await api("POST", "/api/global", { exit: e.target.value })); pingNow(); load(); };
+
+async function pingNow() {
+  const el = $("ping"); if (!S.status.running) { el.textContent = ""; return; }
+  const id = $("globalSel").value; if (id === "direct") { el.textContent = ""; return; }
+  const r = await (await fetch("/api/delay/" + encodeURIComponent(id))).json();
+  el.className = "ping" + (r.ms ? "" : " bad");
+  el.textContent = r.ms ? `${r.ms}ms` : "بدون پاسخ";
+}
+
+$("impWg").onclick = async () => { say("impMsg", await api("POST", "/api/import/wireguard", { name: $("wgName").value, text: $("wgText").value }), "اضافه شد"); $("wgText").value = ""; routesDraft = null; load(); };
+$("impSub").onclick = async () => { say("impMsg", await api("POST", "/api/import/subscription", { url: $("subUrl").value || undefined, text: $("subText").value || undefined }), "وارد شد"); routesDraft = null; load(); };
+$("saveCorp").onclick = async () => { say("corpMsg", await api("POST", "/api/corp", { ovpn_path: $("cPath").value, auth_file: $("cAuth").value, dns: $("cDns").value, enabled: $("cOn").checked }), "ذخیره شد"); load(); };
+$("reloadLogs").onclick = async () => { const l = await (await fetch("/api/logs")).json(); $("logs").textContent = (l.singbox + "\n--- corp ---\n" + l.corp).trim(); };
+
+const editing = () => ["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement?.tagName);
+load().then(pingNow);
+setInterval(() => { if (!editing()) load().then(pingNow); }, 5000);  // never rebuild the DOM under the user's cursor
+</script>
+</body>
+</html>

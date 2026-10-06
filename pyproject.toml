@@ -1,0 +1,15 @@
+[project]
+name = "routeraft"
+version = "0.1.0"
+description = "Modular split-tunnel manager on top of sing-box: swap exits (Surfshark / Windscribe / VLESS) without touching the routing map."
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+routeraft = "routeraft.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["routeraft*"]
+
+[tool.setuptools.package-data]
+routeraft = ["web/*"]
