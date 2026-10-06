@@ -8,6 +8,8 @@ Type=simple
 WorkingDirectory=/opt/routeraft
 ExecStart=/usr/bin/python3 -m routeraft --state-dir /var/lib/routeraft serve
 Restart=on-failure
+# Whatever happens to the daemon (crash, kill -9, stop), remove leftover tunnels, rules and restore stopped services.
+ExecStopPost=-/usr/bin/python3 -m routeraft --state-dir /var/lib/routeraft panic
 # Web UI is on 127.0.0.1 only; the daemon needs root for TUN + openvpn.
 StateDirectory=routeraft
 StateDirectoryMode=0700

@@ -30,13 +30,17 @@ def main(argv=None) -> int:
     v.add_argument("source")
     v.add_argument("--name", default="sub")
     sub.add_parser("update-rules", help="download the Iran rule sets into the cache")
+    sub.add_parser("panic", help="stop RouteRaft's processes and remove its network changes (needs root)")
     a = ap.parse_args(argv)
 
     store = Store(Path(a.state_dir))
     sup = Supervisor(store, dry_run=getattr(a, "dry_run", False))
 
     if a.cmd == "serve":
+        sup.startup_cleanup()
         serve(store, sup)
+    elif a.cmd == "panic":
+        print(json.dumps(sup.panic(), indent=2))
     elif a.cmd == "build":
         print(json.dumps(sup.build(), indent=2))
     elif a.cmd == "import-path":

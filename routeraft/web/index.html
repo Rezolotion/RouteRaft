@@ -22,7 +22,7 @@
   :focus-visible { outline:2px solid var(--ring); outline-offset:2px; border-radius:6px; }
   .sr { position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0 0 0 0); }
 
-  .shell { display:grid; grid-template-columns:220px 1fr; min-height:100vh; }
+  .shell { display:grid; grid-template-columns:220px minmax(0,1fr); min-height:100vh; }
   nav.side { border-right:1px solid var(--border); padding:20px 12px; position:sticky; top:0; height:100vh; display:flex; flex-direction:column; gap:4px; }
   .brand { display:flex; align-items:center; gap:10px; padding:4px 10px 18px; font-weight:650; font-size:16px; letter-spacing:-.01em; }
   .brand svg { color:var(--primary); }
@@ -57,7 +57,7 @@
   button.cta { min-height:44px; padding:10px 28px; font-size:15px; }
 
   .paths { display:flex; flex-direction:column; gap:10px; margin-top:20px; }
-  .path { display:grid; grid-template-columns:160px minmax(24px,1fr) 280px minmax(24px,1fr) 190px; align-items:center; gap:0; }
+  .path { display:grid; grid-template-columns:minmax(0,1fr) 20px minmax(0,1.5fr) 20px minmax(0,1fr) 112px; align-items:center; gap:0; }
   .endpoint, .via { background:var(--surface-2); border:1px solid var(--border); border-radius:10px; padding:10px 12px; display:flex; align-items:center; gap:10px; min-height:52px; min-width:0; }
   .endpoint svg, .via svg { flex:none; color:var(--muted); }
   .endpoint b, .via b { font-weight:600; display:block; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
@@ -65,6 +65,13 @@
   .link { height:2px; background:var(--border-strong); position:relative; }
   .link.live.proxy { background:var(--primary); } .link.live.direct { background:var(--ok); } .link.live.corp { background:var(--warn); }
   .via.proxy svg { color:var(--primary); } .via.direct svg { color:var(--ok); } .via.corp svg { color:var(--warn); }
+  .switch-btn { display:inline-flex; align-items:center; gap:8px; background:none; border:0; padding:4px 0; min-height:36px; color:var(--muted); font-size:12px; font-weight:500; cursor:pointer; justify-self:end; }
+  .switch-btn .track { width:34px; height:20px; border-radius:99px; background:var(--border-strong); position:relative; transition:background .15s; flex:none; }
+  .switch-btn .track::after { content:""; position:absolute; top:2px; left:2px; width:16px; height:16px; border-radius:50%; background:#fff; transition:transform .15s; }
+  .switch-btn[aria-checked=true] { color:var(--text); } .switch-btn[aria-checked=true] .track { background:var(--ok); } .switch-btn[aria-checked=true] .track::after { transform:translateX(14px); }
+  .always { justify-self:end; font-size:12px; color:var(--muted); }
+  .notice { display:none; margin-top:14px; padding:10px 14px; border-radius:10px; border:1px solid var(--warn); background:rgba(245,158,11,.1); font-size:13px; } .notice.show { display:block; }
+  .actions { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
   .latency { font:12px var(--mono); color:var(--ok); } .latency.bad { color:var(--danger); }
 
   .banner { position:sticky; top:12px; z-index:10; display:none; align-items:center; gap:14px; background:var(--warn); color:#1a1200; border-radius:var(--radius); padding:12px 16px; margin-bottom:16px; font-weight:550; box-shadow:0 8px 24px rgba(0,0,0,.25); }
@@ -102,10 +109,15 @@
   pre { background:var(--surface-2); border:1px solid var(--border); padding:12px; border-radius:10px; max-height:420px; overflow:auto; font:12px/1.5 var(--mono); margin:0; }
   .empty { padding:36px 16px; text-align:center; color:var(--muted); }
 
+  @media (max-width:1060px) {
+    .path { grid-template-columns:minmax(0,1fr) 16px minmax(0,1.5fr) 16px minmax(0,1fr); row-gap:6px; }
+    .path > .switch-btn, .path > .always { grid-column:1 / -1; justify-self:end; min-height:28px; }
+    .path + .path { padding-top:6px; border-top:1px solid var(--border); }
+  }
   @media (max-width:860px) {
     .shell { grid-template-columns:1fr; } nav.side { position:static; height:auto; flex-direction:row; overflow-x:auto; border-right:0; border-bottom:1px solid var(--border); padding:10px; }
     .brand, .side-foot, nav.side .grow { display:none; } nav.side a { white-space:nowrap; }
-    .path { grid-template-columns:1fr; gap:6px; } .link { width:2px; height:14px; margin-left:22px; } .grid2, .grid3 { grid-template-columns:1fr; }
+    .path { grid-template-columns:1fr; gap:6px; } .switch-btn, .always { justify-self:start; } .link { width:2px; height:14px; margin-left:22px; } .grid2, .grid3 { grid-template-columns:1fr; }
   }
   @media (prefers-reduced-motion: reduce) { * { transition:none !important; animation:none !important; } }
 </style>
@@ -142,8 +154,12 @@
             <span class="big" id="gHead">—</span>
             <span class="hint" id="gSub"></span>
           </div>
-          <button id="btnConn" class="primary cta">Connect</button>
+          <div class="actions">
+            <button id="btnPanic" class="ghost" title="Stops RouteRaft and removes every network change it made">Restore normal internet</button>
+            <button id="btnConn" class="primary cta">Connect</button>
+          </div>
         </div>
+        <div class="notice" id="notice" role="status"></div>
         <div class="msg" id="connMsg" role="status"></div>
         <div class="paths" id="paths"></div>
       </div>
@@ -310,6 +326,9 @@ function render() {
   $("gHead").textContent = g ? g.name : auto ? "Fastest node" : "No tunnel";
   $("gSub").textContent = g ? `${KIND(g)} · ${g.country || cap(PROV(g))}` : auto ? "Lowest-latency node of the selected subscription" : "All non-matching traffic uses your normal connection";
 
+  const n = $("notice"), hl = status.health || {};
+  const msg = status.event || (up && hl.ok === false && hl.failures >= 2 && !state.global_paused ? `The global exit is not responding (${hl.failures} failed checks). Use the switch below to bypass it, or pick another exit.` : "");
+  n.textContent = msg; n.classList.toggle("show", !!msg);
   renderPaths(); renderExits(); renderSubs(); renderProviders();
   if (!$("v-corporate").contains(document.activeElement)) { $("cPath").value = state.corp.ovpn_path; $("cDns").value = state.corp.dns; $("cOn").checked = state.corp.enabled; }
   if (!routesDraft) routesDraft = JSON.parse(JSON.stringify(state.routes));
@@ -320,16 +339,34 @@ function renderPaths() {
   const { state, status } = S, up = status.running, g = state.exits[state.global], auto = (state.global || "").startsWith("auto:");
   const ep = (ic, title, sub) => h("div", { class: "endpoint" }, icon(ic), h("div", { style: "min-width:0" }, h("b", {}, title), h("small", {}, sub)));
   const via = (cls, ic, title, sub, extra) => h("div", { class: "via " + cls }, icon(ic), h("div", { style: "min-width:0;flex:1" }, h("b", {}, title), h("small", {}, sub)), extra || "");
-  const link = cls => h("div", { class: "link " + cls + (up ? " live" : "") });
+  const link = (cls, off) => h("div", { class: "link " + cls + (up && !off ? " live" : "") });
+  const sw = (lane, paused) => {
+    const on = !paused;
+    return h("button", { class: "switch-btn", role: "switch", "aria-checked": String(on), "aria-label": `${on ? "Bypass" : "Resume"} ${lane === "global" ? "the global exit" : "this rule"}`,
+      title: on ? "Bypass: send this traffic through your normal connection" : "Resume the tunnel for this traffic",
+      onclick: async () => { say("connMsg", await api("POST", "/api/lane", { lane, paused: on }), on ? "Bypassing the tunnel" : "Tunnel resumed"); load(); } },
+      h("span", { class: "track" }), on ? "Tunnel" : "Bypassed");
+  };
   const lat = h("span", { class: "latency", id: "ping" });
   const change = h("button", { class: "sm ghost", onclick: () => { location.hash = "#exits"; } }, "Change");
-  const corpOn = state.corp.enabled;
-  const rows = [
-    ["proxy", ep("laptop", "This laptop", "All traffic"), via("proxy", "globe", g ? g.name : auto ? "Fastest node" : "Direct", g ? `${KIND(g)} · ${g.country || cap(PROV(g))}` : "Global exit", h("div", { class: "row", style: "gap:8px;flex:none" }, lat, change)), ep("globe", "The internet", "Everything else")],
-    ["direct", ep("laptop", "This laptop", "Domestic traffic"), via("direct", "home", "Direct", "Your ISP connection"), ep("home", "Domestic sites", ".ir and local rule sets")],
-    ["corp", ep("laptop", "This laptop", "Corporate traffic"), via("corp", "building", "Corporate VPN", !corpOn ? "Disabled" : status.corp_running ? "Connected" : "Not connected"), ep("building", "Internal tools", "Your domains and IPs")],
-  ];
-  $("paths").replaceChildren(...rows.map(([cls, a, v, b]) => h("div", { class: "path" }, a, link(cls), v, link(cls), b)));
+  const gp = !!state.global_paused;
+  const rows = [h("div", { class: "path" },
+    ep("laptop", "This laptop", "Everything not matched below"),
+    link("proxy", gp),
+    via(gp ? "direct" : "proxy", "globe", g ? g.name : auto ? "Fastest node" : "No tunnel", gp ? "Bypassed: normal connection" : g ? `${KIND(g)} · ${g.country || cap(PROV(g))}` : "Global exit", h("div", { class: "row", style: "gap:8px;flex:none" }, lat, change)),
+    link("proxy", gp),
+    ep("globe", "The internet", "Default route"),
+    sw("global", gp))];
+  for (const r of state.routes.filter(r => r.enabled)) {
+    const t = r.exit, label = t === "direct" ? "Direct" : t === "corp" ? "Corporate VPN" : t === "global" ? "Global exit" : (state.exits[t]?.name || t);
+    const cls = t === "direct" ? "direct" : t === "corp" ? "corp" : "proxy", ic = t === "direct" ? "home" : t === "corp" ? "building" : "globe";
+    const what = [...r.domain_suffix, ...r.domain, ...r.ip_cidr, ...r.rule_set].slice(0, 3).join(", ") || "No matchers yet";
+    const paused = !!r.paused && t !== "direct";
+    const sub = t === "direct" ? "Your ISP connection" : t === "corp" ? (!state.corp.enabled ? "Disabled" : status.corp_running ? "Connected" : "Not connected") : paused ? "Bypassed: normal connection" : "Through the tunnel";
+    rows.push(h("div", { class: "path" }, ep("laptop", "This laptop", "Matching traffic"), link(cls, paused), via(paused ? "direct" : cls, ic, label, sub),
+      link(cls, paused), ep(ic, r.name, what), t === "direct" ? h("span", { class: "always" }, "Always direct") : sw(r.id, paused)));
+  }
+  $("paths").replaceChildren(...rows);
   pingNow();
 }
 
@@ -422,6 +459,7 @@ document.querySelectorAll("#addTabs button").forEach(b => b.onclick = () => {
 $("addRoute").onclick = () => { routesDraft.push({ id: "r" + Date.now(), name: "New rule", enabled: true, exit: "global", domain_suffix: [], domain: [], ip_cidr: [], rule_set: [], process_name: [] }); renderRoutes(); };
 $("saveRoutes").onclick = async () => { say("routeMsg", await api("POST", "/api/routes", { routes: routesDraft }), "Rules applied"); routesDraft = null; load(); };
 $("btnConn").onclick = async () => { const b = $("btnConn"); b.disabled = true; $("connMsg").textContent = ""; say("connMsg", await api("POST", S.status.running ? "/api/disconnect" : "/api/connect"), S.status.running ? "Disconnected" : "Connected"); b.disabled = false; load(); };
+$("btnPanic").onclick = async () => { if (!confirm("Stop RouteRaft and restore your normal internet connection?")) return; say("connMsg", await api("POST", "/api/panic"), "Normal internet restored"); load(); };
 $("btnConfirm").onclick = async () => { await api("POST", "/api/confirm"); load(); };
 $("btnBail").onclick = async () => { await api("POST", "/api/disconnect"); load(); };
 $("btnImpPath").onclick = async () => { $("impMsg").textContent = "Importing…"; say("impMsg", await api("POST", "/api/import/path", { path: $("impPath").value, provider: $("impProv").value }), "Imported"); routesDraft = null; load(); };

@@ -23,6 +23,7 @@ SECRET_KEYS = ("outbound", "endpoint", "ovpn_path", "ike")  # payloads that neve
 DEFAULT_STATE = {
     "version": 2,
     "global": "",  # id of the exit used by the global slot ("" => direct)
+    "global_paused": False,  # True = the global slot is bypassed (traffic leaves directly) until resumed
     "favorites": [],  # WireGuard exits kept loaded in sing-box so switching is instant
     "exits": {},
     "providers": {  # service credentials for OpenVPN/IKEv2 profiles
@@ -58,7 +59,9 @@ DEFAULT_STATE = {
         "test_url": "https://www.gstatic.com/generate_204",
         "vpn_iface": "rr-vpn0",  # interface the active OpenVPN global exit uses
         "stop_conflicting": ["v2raya"],
-        "rollback_seconds": 90,  # auto-disconnect unless a new config is confirmed in time
+        "rollback_seconds": 90,
+        "failover": "warn",       # "warn": only report a dead global exit; "bypass": route around it automatically
+        "health_interval": 20,    # seconds between global-exit health checks  # auto-disconnect unless a new config is confirmed in time
         "rule_sets": {
             "geosite-ir": "https://github.com/Chocolate4U/Iran-sing-box-rules/releases/latest/download/geosite-ir.srs",
             "geoip-ir": "https://github.com/Chocolate4U/Iran-sing-box-rules/releases/latest/download/geoip-ir.srs",

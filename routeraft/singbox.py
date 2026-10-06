@@ -33,6 +33,11 @@ def member_for(state: dict, exit_id: str) -> str:
     return {"openvpn": "ovpn", "ikev2": "ikev2"}.get(e["kind"], exit_id)
 
 
+def rule_tag(rule_id: str) -> str:
+    """Selector tag that carries a rule's live on/off switch."""
+    return f"rule:{rule_id}"
+
+
 def loaded_wireguard(state: dict) -> set[str]:
     """WireGuard endpoints start with sing-box, so only keep favourites + the selected one loaded."""
     wg = {i for i, e in state["exits"].items() if e["kind"] == "wireguard"}
@@ -71,7 +76,7 @@ def build(state: dict, rule_dir: Path | None = None) -> dict:
         outbounds.append({"type": "direct", "tag": "ikev2", "bind_interface": IKE_IFACE})
         members.append("ikev2")
     members.append("direct")
-    want = member_for(state, state["global"]) if state["global"] else "direct"
+    want = "direct" if state.get("global_paused") or not state["global"] else member_for(state, state["global"])
     outbounds.append({"type": "selector", "tag": "global", "outbounds": members,
                       "default": want if want in members else "direct"})
     if corp_on:
@@ -104,11 +109,6 @@ def build(state: dict, rule_dir: Path | None = None) -> dict:
     local = ({"type": "local", "tag": "dns-direct"} if st["local_dns"] == "local"
              else {"type": "udp", "tag": "dns-direct", "server": st["local_dns"]})
     dns_servers = [local, {"type": "https", "tag": "dns-global", "server": st["remote_dns"], "detour": "global"}]
-    dns_for = {"direct": "dns-direct", "global": "dns-global"}
-    if corp_on and corp.get("dns"):
-        dns_servers.append({"type": "udp", "tag": "dns-corp", "server": corp["dns"], "detour": "corp"})
-        dns_for["corp"] = "dns-corp"
-
     route_rules = [{"action": "sniff"}, {"protocol": "dns", "action": "hijack-dns"}]
     dns_rules: list[dict] = []
 
@@ -137,10 +137,25 @@ def build(state: dict, rule_dir: Path | None = None) -> dict:
         if not match:
             continue
         out = target(r["exit"])
-        route_rules.append({**match, "action": "route", "outbound": out})
         dm = {k: v for k, v in match.items() if k in ("domain_suffix", "domain", "rule_set")}
-        if dm:
-            dns_rules.append({**dm, "action": "route", "server": dns_for.get(out, "dns-global")})
+        if out == "direct":
+            route_rules.append({**match, "action": "route", "outbound": "direct"})
+            if dm:
+                dns_rules.append({**dm, "action": "route", "server": "dns-direct"})
+            continue
+        # Live switch: the rule points at a selector that can flip between its target and
+        # `direct` through the clash API, with no restart and no effect on other traffic.
+        sel = rule_tag(r["id"])
+        outbounds.append({"type": "selector", "tag": sel, "outbounds": [out, "direct"],
+                          "default": "direct" if r.get("paused") else out})
+        route_rules.append({**match, "action": "route", "outbound": sel})
+        if dm:  # DNS follows the switch, so a bypassed rule never resolves through its tunnel
+            if out == "corp" and corp.get("dns"):
+                srv = {"type": "udp", "tag": f"dns-{r['id']}", "server": corp["dns"], "detour": sel}
+            else:
+                srv = {"type": "https", "tag": f"dns-{r['id']}", "server": st["remote_dns"], "detour": sel}
+            dns_servers.append(srv)
+            dns_rules.append({**dm, "action": "route", "server": srv["tag"]})
 
     route_rules.append({"ip_is_private": True, "action": "route", "outbound": "direct"})
 

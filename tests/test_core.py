@@ -5,7 +5,7 @@ import unittest
 import zipfile
 from pathlib import Path
 
-from routeraft import parsers, singbox
+from routeraft import cleanup, parsers, singbox
 from routeraft.config import Store
 from routeraft.supervisor import Supervisor
 
@@ -196,7 +196,7 @@ class Build(unittest.TestCase):
         rules = cfg["route"]["rules"]
         self.assertEqual(cfg["route"]["final"], "global")
         self.assertEqual(next(r for r in rules if r.get("domain_suffix") == [".ir"])["outbound"], "direct")
-        corp_i = next(i for i, r in enumerate(rules) if r.get("outbound") == "corp")
+        corp_i = next(i for i, r in enumerate(rules) if r.get("outbound") == "rule:corp")
         priv_i = next(i for i, r in enumerate(rules) if r.get("ip_is_private"))
         self.assertLess(corp_i, priv_i)
 
@@ -221,6 +221,101 @@ class Build(unittest.TestCase):
         self.d["routes"][0]["exit"] = "Surfshark-DE"
         self.st.remove_exit("Surfshark-DE")
         self.assertEqual(self.d["routes"][0]["exit"], "global")
+
+
+class LiveSwitches(unittest.TestCase):
+    def setUp(self):
+        self.sup = fresh()
+        self.sup.store.add_exits([parsers.parse_wireguard(WG, "A")])
+        self.d = self.sup.store.data
+        self.d["corp"].update(enabled=True, ovpn_path="/x.ovpn", dns="10.0.0.53")
+        self.d["routes"][1].update(domain_suffix=[".corp.example"])
+
+    def sel(self, cfg, tag):
+        return next((o for o in cfg["outbounds"] if o["tag"] == tag), None)
+
+    def test_rules_with_a_tunnel_target_get_a_two_way_selector(self):
+        cfg = singbox.build(self.d)
+        s = self.sel(cfg, "rule:corp")
+        self.assertEqual((s["type"], s["outbounds"], s["default"]), ("selector", ["corp", "direct"], "corp"))
+        self.assertIsNone(self.sel(cfg, "rule:iran"))  # direct-target rules need no switch
+
+    def test_paused_rule_defaults_to_direct_and_dns_follows_the_switch(self):
+        self.d["routes"][1]["paused"] = True
+        cfg = singbox.build(self.d)
+        self.assertEqual(self.sel(cfg, "rule:corp")["default"], "direct")
+        dns = next(x for x in cfg["dns"]["servers"] if x["tag"] == "dns-corp")
+        self.assertEqual((dns["server"], dns["detour"]), ("10.0.0.53", "rule:corp"))
+
+    def test_global_pause_defaults_the_selector_to_direct(self):
+        self.d["global"] = "A"
+        self.assertEqual(self.sel(singbox.build(self.d), "global")["default"], "A")
+        self.d["global_paused"] = True
+        self.assertEqual(self.sel(singbox.build(self.d), "global")["default"], "direct")
+
+    def test_pause_does_not_look_like_a_new_config_to_the_rollback_guard(self):
+        h1 = self.sup.config_hash(self.sup.build())
+        self.d["routes"][1]["paused"] = True
+        self.d["global_paused"] = True
+        self.assertEqual(h1, self.sup.config_hash(self.sup.build()))
+
+    def test_set_lane_persists_when_not_running(self):
+        self.assertTrue(self.sup.set_lane("corp", True)["ok"])
+        self.assertTrue(self.d["routes"][1]["paused"])
+        self.assertTrue(self.sup.set_lane("global", True)["ok"])
+        self.assertTrue(self.d["global_paused"])
+        self.assertFalse(self.sup.set_lane("nope", True)["ok"])
+
+
+class FakeRun:
+    """Stands in for subprocess.run so tests never touch the real network stack."""
+    def __init__(self, fail=()):
+        self.calls, self.fail, self.rule_budget = [], set(fail), 2
+
+    def __call__(self, cmd, **kw):
+        self.calls.append(cmd)
+        rc = 0
+        if cmd[:3] in (["ip", "-4", "rule"], ["ip", "-6", "rule"]):
+            self.rule_budget -= 1  # pretend exactly one rule exists per family, then none
+            rc = 0 if cmd[-1] == "9000" and self.rule_budget >= 0 else 1
+        if tuple(cmd) in self.fail:
+            rc = 1
+        return type("R", (), {"returncode": rc})()
+
+
+class Cleanup(unittest.TestCase):
+    def test_clean_network_is_idempotent_and_scoped_to_singbox(self):
+        run = FakeRun()
+        done = cleanup.clean_network(["definitely-not-an-interface"], run)
+        deleted = [c for c in run.calls if c[2:4] == ["rule", "del"]]
+        self.assertTrue(deleted and all(9000 <= int(c[-1]) <= 9010 for c in deleted))
+        self.assertTrue(any(c == ["ip", "-4", "route", "flush", "table", "2022"] for c in run.calls))
+        self.assertFalse(any(c[:3] == ["ip", "link", "del"] for c in run.calls))  # interface absent -> untouched
+        self.assertTrue(any("rule priority 9000" in d for d in done))
+
+    def test_removes_an_interface_only_if_it_exists(self):
+        run = FakeRun()
+        cleanup.clean_network(["lo"], run)  # `lo` exists on every Linux box; the fake runner makes this safe
+        self.assertIn(["ip", "link", "del", "lo"], run.calls)
+
+    def test_kill_leftovers_ignores_unrelated_or_recycled_pids(self):
+        import os
+        d = Path(tempfile.mkdtemp())
+        cleanup.record_pid(d, "sing-box", os.getpid())  # this test process: not sing-box/openvpn
+        self.assertEqual(cleanup.kill_leftovers(d), [])
+        self.assertFalse((d / cleanup.PIDFILE).exists())
+
+    def test_restore_services_starts_only_what_we_stopped(self):
+        d = Path(tempfile.mkdtemp())
+        cleanup.record_stopped(d, ["v2raya"])
+        run = FakeRun()
+        self.assertEqual(cleanup.restore_services(d, run), ["v2raya"])
+        self.assertEqual(run.calls, [["systemctl", "start", "v2raya"]])
+        self.assertEqual(cleanup.restore_services(d, run), [])  # second call is a no-op
+
+    def test_panic_in_dry_run_touches_nothing(self):
+        sup = fresh()
+        self.assertEqual(sup.panic(), {"ok": True})
 
 
 class Rollback(unittest.TestCase):

@@ -111,6 +111,10 @@ def make_handler(store: Store, sup: Supervisor):
                 s["routes"] = b["routes"]
                 store.save()
                 return sup.apply()
+            if path == "/api/panic":
+                return sup.panic()
+            if path == "/api/lane":  # live per-lane switch: {lane: "global" | <rule id>, paused: bool}
+                return sup.set_lane(b["lane"], bool(b["paused"]))
             if path == "/api/confirm":
                 return sup.confirm()
             if path == "/api/import/wireguard":
