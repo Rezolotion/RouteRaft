@@ -99,7 +99,7 @@ class Supervisor:
              "singbox_installed": bool(which("sing-box")), "openvpn_installed": bool(which("openvpn")),
              "dry_run": self.dry_run, "selected": d["global"],
              "rollback_in": max(0, int(self.rollback_deadline - time.time())) if self.rollback_timer else 0,
-             "health": self.health, "event": self.event}
+             "health": self.health, "event": self.event, "rule_sets": self.rule_set_status()}
         return s
 
     # ---------------------------------------------------------- rollback
@@ -138,6 +138,10 @@ class Supervisor:
         with self.lock:
             if self.running():
                 return {"ok": True, "note": "already running"}
+            missing = [t for t, cached in self.rule_set_status().items() if not cached]
+            if missing and not self.dry_run:
+                self.update_rules(timeout=10)  # best effort, on the normal network, before the tunnel exists
+                missing = [t for t, cached in self.rule_set_status().items() if not cached]
             _, h = self.write_config()
             err = self.check_config()
             if err:
@@ -150,14 +154,15 @@ class Supervisor:
             if os.geteuid() != 0:
                 return {"ok": False, "error": "need root to create the TUN device (run the daemon as a service)"}
             for svc in ([] if self.keep_services else self.store.data["settings"]["stop_conflicting"]):
-                if subprocess.run(["systemctl", "is-active", "--quiet", svc]).returncode == 0:
-                    subprocess.run(["systemctl", "stop", svc])
+                if self._systemctl("is-active", "--quiet", svc) == 0:
+                    self._systemctl("stop", svc)
                     self.stopped_services.append(svc)
             cleanup.record_stopped(self.store.dir, self.stopped_services)
-            warn = ""
+            warn = (f"Rule sets not cached ({', '.join(missing)}); only explicit domains and ranges are matched. "
+                    "Use Update rule sets in Routing.") if missing else ""
             if self.store.data["corp"]["enabled"]:
                 r = self.corp_up()
-                warn = "" if r["ok"] else f"company VPN: {r['error']}"
+                warn = (warn + " " if warn else "") + ("" if r["ok"] else f"company VPN: {r['error']}")
             g = self.store.data["exits"].get(self.store.data["global"])
             if g and g["kind"] == "openvpn":
                 r = self._vpn_up(g)
@@ -183,6 +188,14 @@ class Supervisor:
                     continue
             self.disconnect()
             return {"ok": False, "error": "sing-box started but its API never answered; see logs"}
+
+    @staticmethod
+    def _systemctl(*args: str) -> int | None:
+        """Return systemctl's exit code, or None where systemd is not available (containers, non-systemd distros)."""
+        try:
+            return subprocess.run(["systemctl", *args], capture_output=True).returncode
+        except OSError:
+            return None
 
     def _restore_services(self) -> None:
         if not self.dry_run:  # give back what we took
@@ -215,9 +228,14 @@ class Supervisor:
     def panic(self) -> dict:
         """Restore normal internet no matter what state we are in, including after a crash."""
         with self.lock:
+            # Order matters: after a daemon crash this process owns no Popen handles, so the PID book is the only
+            # way to find the orphaned sing-box/openvpn. disconnect() forgets those PIDs, so use them first.
+            early = cleanup.kill_leftovers(self.store.dir) if self._can_touch_network() else []
             self.disconnect()
             self.event = ""
             extra = cleanup.panic(self.store.dir, self._ifaces()) if self._can_touch_network() else {}
+            if early:
+                extra["killed"] = early + extra.get("killed", [])
         return {"ok": True, **extra}
 
     def startup_cleanup(self) -> None:
@@ -508,13 +526,28 @@ class Supervisor:
         return {"ok": r["ok"], "added": len(exits), "skipped": skipped[:20], "skipped_count": len(skipped),
                 **({"error": r["error"]} if not r["ok"] else {})}
 
-    def update_rules(self) -> dict:
+    def used_rule_sets(self) -> list[str]:
+        return sorted({t for r in self.store.data["routes"] if r["enabled"] for t in r["rule_set"]
+                       if t in self.store.data["settings"]["rule_sets"]})
+
+    def rule_set_status(self) -> dict[str, bool]:
+        """tag -> is the file cached locally (and therefore usable by sing-box)."""
+        return {t: (self.rule_dir / f"{t}.srs").exists() and (self.rule_dir / f"{t}.srs").stat().st_size > 0
+                for t in self.used_rule_sets()}
+
+    def update_rules(self, timeout: float = 30) -> dict:
+        """Download the rule sets into the cache. Files are replaced atomically; a failed fetch keeps the old copy."""
         out = {}
         for tag, url in self.store.data["settings"]["rule_sets"].items():
             try:
-                with urllib.request.urlopen(url, timeout=30) as r:
-                    (self.rule_dir / f"{tag}.srs").write_bytes(r.read())
-                out[tag] = "ok"
+                with urllib.request.urlopen(url, timeout=timeout) as r:
+                    data = r.read()
+                if not data:
+                    raise ValueError("empty response")
+                tmp = self.rule_dir / f".{tag}.part"
+                tmp.write_bytes(data)
+                os.replace(tmp, self.rule_dir / f"{tag}.srs")
+                out[tag] = f"ok ({len(data)} bytes)"
             except NET_ERRORS as e:
                 out[tag] = f"failed: {e}"
         return out

@@ -267,6 +267,47 @@ class LiveSwitches(unittest.TestCase):
         self.assertFalse(self.sup.set_lane("nope", True)["ok"])
 
 
+class RuleSets(unittest.TestCase):
+    def test_missing_cache_never_blocks_the_tunnel(self):
+        sup = fresh()
+        cfg = singbox.build(sup.store.data, sup.rule_dir)
+        self.assertEqual(cfg["route"]["rule_set"], [])  # nothing to download at startup
+        iran = next(r for r in cfg["route"]["rules"] if r.get("domain_suffix") == [".ir"])
+        self.assertNotIn("rule_set", iran)               # .ir suffix still matches without the sets
+        self.assertEqual(sup.rule_set_status(), {"geosite-ir": False, "geoip-ir": False})
+
+    def test_cached_files_become_local_rule_sets(self):
+        sup = fresh()
+        (sup.rule_dir / "geoip-ir.srs").write_bytes(b"\x01data")
+        cfg = singbox.build(sup.store.data, sup.rule_dir)
+        self.assertEqual([r["tag"] for r in cfg["route"]["rule_set"]], ["geoip-ir"])
+        self.assertTrue(all(r["type"] == "local" for r in cfg["route"]["rule_set"]))
+        iran = next(r for r in cfg["route"]["rules"] if r.get("domain_suffix") == [".ir"])
+        self.assertEqual(iran["rule_set"], ["geoip-ir"])
+        self.assertEqual(sup.rule_set_status(), {"geosite-ir": False, "geoip-ir": True})
+
+    def test_empty_cache_file_is_treated_as_missing(self):
+        sup = fresh()
+        (sup.rule_dir / "geoip-ir.srs").write_bytes(b"")
+        self.assertEqual(singbox.build(sup.store.data, sup.rule_dir)["route"]["rule_set"], [])
+
+    def test_dns_rules_only_use_domain_rule_sets(self):
+        sup = fresh()
+        for tag in ("geoip-ir", "geosite-ir"):
+            (sup.rule_dir / f"{tag}.srs").write_bytes(b"x")
+        cfg = singbox.build(sup.store.data, sup.rule_dir)
+        route = next(r for r in cfg["route"]["rules"] if r.get("domain_suffix") == [".ir"])
+        self.assertEqual(sorted(route["rule_set"]), ["geoip-ir", "geosite-ir"])  # both match connections
+        dns = next(r for r in cfg["dns"]["rules"] if r.get("domain_suffix") == [".ir"])
+        self.assertEqual(dns["rule_set"], ["geosite-ir"])                         # only the domain set matches queries
+
+    def test_no_deprecated_remote_options_are_ever_emitted(self):
+        sup = fresh()
+        text = json.dumps(singbox.build(sup.store.data, sup.rule_dir))
+        self.assertNotIn("download_detour", text)
+        self.assertNotIn('"remote"', text)
+
+
 class FakeRun:
     """Stands in for subprocess.run so tests never touch the real network stack."""
     def __init__(self, fail=()):
@@ -312,6 +353,25 @@ class Cleanup(unittest.TestCase):
         self.assertEqual(cleanup.restore_services(d, run), ["v2raya"])
         self.assertEqual(run.calls, [["systemctl", "start", "v2raya"]])
         self.assertEqual(cleanup.restore_services(d, run), [])  # second call is a no-op
+
+    def test_kill_leftovers_stops_a_recorded_singbox_like_process(self):
+        import subprocess, time
+        d = Path(tempfile.mkdtemp())
+        proc = subprocess.Popen(["bash", "-c", "exec -a sing-box-fake sleep 60"])
+        time.sleep(0.3)
+        cleanup.record_pid(d, "sing-box", proc.pid)
+        killed = cleanup.kill_leftovers(d)
+        proc.wait(timeout=5)  # reaped here, so it must really have been terminated
+        self.assertEqual(len(killed), 1)
+        self.assertIsNotNone(proc.returncode)
+
+    def test_zombie_is_not_considered_running(self):
+        import os, subprocess, time
+        child = subprocess.Popen(["true"])
+        time.sleep(0.3)  # exited but not yet waited on: a zombie
+        self.assertFalse(cleanup._running(child.pid))
+        child.wait()
+        self.assertTrue(cleanup._running(os.getpid()))
 
     def test_panic_in_dry_run_touches_nothing(self):
         sup = fresh()

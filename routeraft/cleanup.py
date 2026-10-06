@@ -63,6 +63,15 @@ def forget_pid(state_dir: Path, key: str) -> None:
         f.write_text(json.dumps(data))
 
 
+def _running(pid: int) -> bool:
+    """True if the process exists and is not a zombie (an unreaped, already-dead child)."""
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+    except OSError:
+        return False
+    return stat.rsplit(")", 1)[-1].split()[0] != "Z"
+
+
 def kill_leftovers(state_dir: Path) -> list[str]:
     """Stop processes recorded by a previous run. Verifies the command line first so a recycled PID is never hit."""
     f = state_dir / PIDFILE
@@ -70,17 +79,19 @@ def kill_leftovers(state_dir: Path) -> list[str]:
     if not f.exists():
         return killed
     for key, pid in json.loads(f.read_text()).items():
+        if not _running(pid):
+            continue  # already gone
         try:
             cmd = Path(f"/proc/{pid}/cmdline").read_bytes().decode(errors="replace")
         except OSError:
-            continue  # already gone
+            continue
         if not any(name in cmd for name in ("sing-box", "openvpn")):
             continue
         try:
             os.kill(pid, signal.SIGTERM)
             for _ in range(20):
                 time.sleep(0.2)
-                if not Path(f"/proc/{pid}").exists():
+                if not _running(pid):
                     break
             else:
                 os.kill(pid, signal.SIGKILL)

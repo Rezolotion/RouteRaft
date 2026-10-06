@@ -63,8 +63,8 @@ DEFAULT_STATE = {
         "failover": "warn",       # "warn": only report a dead global exit; "bypass": route around it automatically
         "health_interval": 20,    # seconds between global-exit health checks  # auto-disconnect unless a new config is confirmed in time
         "rule_sets": {
-            "geosite-ir": "https://github.com/Chocolate4U/Iran-sing-box-rules/releases/latest/download/geosite-ir.srs",
-            "geoip-ir": "https://github.com/Chocolate4U/Iran-sing-box-rules/releases/latest/download/geoip-ir.srs",
+            "geosite-ir": "https://raw.githubusercontent.com/Chocolate4U/Iran-sing-box-rules/rule-set/geosite-ir.srs",
+            "geoip-ir": "https://raw.githubusercontent.com/Chocolate4U/Iran-sing-box-rules/rule-set/geoip-ir.srs",
         },
     },
     "confirmed_config": "",  # hash of the last config the user confirmed working

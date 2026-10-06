@@ -49,7 +49,7 @@ Subscription formats: base64 or plain share-link lists, Clash / Mihomo YAML, and
 
 - Linux with systemd, root privileges for the daemon (TUN device, OpenVPN)
 - Python 3.11+, `python3-yaml` (only for Clash subscriptions)
-- sing-box 1.12 or newer
+- sing-box 1.12 or newer (developed and tested against 1.14)
 - `openvpn` (only if you use OpenVPN exits)
 
 ## Install
@@ -89,11 +89,18 @@ sing-box cannot speak OpenVPN, so each OpenVPN exit runs as its own `openvpn` pr
 ## Development
 
 ```bash
-python3 -m unittest discover -s tests -v
-python3 -m routeraft --state-dir dev-state serve --dry-run    # never touches the network
+python3 -m unittest discover -s tests -v                       # unit tests
+python3 -m routeraft --state-dir dev-state serve --dry-run     # UI and configs only; never touches the network
+bash scripts/sandbox.sh                                        # live end-to-end suite in a throwaway container
 ```
 
 `--dry-run` writes configurations and serves the UI without starting sing-box or OpenVPN.
+
+`scripts/sandbox.sh` runs the real daemon and the real sing-box inside a Docker container with its own network namespace, so the TUN device, policy rules and DNS handling exist only there and the host network is never touched. It covers connect, the auto-rollback, confirmation, live lane switching, recovery after `kill -9` of sing-box and of the daemon, and the panic button. It needs Docker, a local `debian:12` image and a Debian 12 host (the host's `/usr` is mounted read-only into the container).
+
+### Rule sets
+
+The domestic rule sets (`geosite-ir`, `geoip-ir`) are cached files, never fetched by sing-box at startup, because a failed download there is fatal and downloads are unreliable on filtered networks. RouteRaft tries to refresh missing sets before connecting and otherwise starts without them; explicit domain suffixes such as `.ir` keep matching. Refresh them any time with `routeraft update-rules`.
 
 ## Security model
 

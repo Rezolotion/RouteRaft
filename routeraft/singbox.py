@@ -82,19 +82,15 @@ def build(state: dict, rule_dir: Path | None = None) -> dict:
     if corp_on:
         outbounds.append({"type": "direct", "tag": "corp", "bind_interface": corp["interface"]})
 
-    # ---- rule sets: prefer files cached by `routeraft update-rules`, else fetch via global
+    # ---- rule sets: cached files only. A remote rule set that fails to download is fatal at sing-box
+    # startup, and the download itself is unreliable on filtered networks, so RouteRaft fetches the
+    # files (see Supervisor.update_rules) and the tunnel never depends on that succeeding.
     rule_sets, known = [], set()
     for tag in sorted({s for r in state["routes"] if r["enabled"] for s in r["rule_set"]}):
-        url = st["rule_sets"].get(tag)
-        if not url:
-            continue
         local = rule_dir / f"{tag}.srs" if rule_dir else None
-        if local and local.exists():
+        if local and local.exists() and local.stat().st_size > 0:
             rule_sets.append({"tag": tag, "type": "local", "format": "binary", "path": str(local)})
-        else:
-            rule_sets.append({"tag": tag, "type": "remote", "format": "binary", "url": url,
-                              "download_detour": "global", "update_interval": "7d"})
-        known.add(tag)
+            known.add(tag)
 
     tags = {o["tag"] for o in outbounds} | {e["tag"] for e in endpoints}
 
@@ -137,7 +133,10 @@ def build(state: dict, rule_dir: Path | None = None) -> dict:
         if not match:
             continue
         out = target(r["exit"])
-        dm = {k: v for k, v in match.items() if k in ("domain_suffix", "domain", "rule_set")}
+        dm = {k: v for k, v in match.items() if k in ("domain_suffix", "domain")}
+        sets = [t for t in match.get("rule_set", []) if t.startswith("geosite-")]  # IP sets cannot match a DNS query
+        if sets:
+            dm["rule_set"] = sets
         if out == "direct":
             route_rules.append({**match, "action": "route", "outbound": "direct"})
             if dm:
