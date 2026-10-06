@@ -1,5 +1,9 @@
 __pycache__/
 *.pyc
 dev-state/
+state.json
+*.ovpn
+*.srs
+.env
 *.egg-info/
 .venv/

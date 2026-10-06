@@ -2,112 +2,240 @@ import base64
 import json
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 
 from routeraft import parsers, singbox
 from routeraft.config import Store
+from routeraft.supervisor import Supervisor
 
+UUID = "11111111-2222-3333-4444-555555555555"
 WG = """[Interface]
 PrivateKey = AAAA
 Address = 10.14.0.2/16
-DNS = 162.252.172.57, 149.154.159.92
+DNS = 162.252.172.57
 [Peer]
 PublicKey = BBBB
 AllowedIPs = 0.0.0.0/0, ::/0
 Endpoint = de-1.example.com:51820
 """
-VLESS_WS = "vless://11111111-2222-3333-4444-555555555555@a.example.com:443?type=ws&security=tls&sni=a.example.com&path=%2Fws&host=a.example.com&fp=chrome#Node%20A"
-VLESS_RE = "vless://11111111-2222-3333-4444-555555555555@b.example.com:443?type=tcp&security=reality&sni=x.com&pbk=PUB&sid=ab&fp=chrome&flow=xtls-rprx-vision#Node%20B"
+OVPN = """client
+dev tun
+proto {proto}
+remote {host} 1194
+auth-user-pass
+<ca>
+-----BEGIN CERTIFICATE-----
+x
+-----END CERTIFICATE-----
+</ca>
+"""
+LINKS = {
+    "vless-ws": f"vless://{UUID}@a.example.com:443?type=ws&security=tls&sni=a.example.com&path=%2Fws&host=a.example.com&fp=chrome#%F0%9F%87%A9%F0%9F%87%AA%20Node%20A",
+    "vless-reality": f"vless://{UUID}@b.example.com:443?type=tcp&security=reality&sni=x.com&pbk=PUB&sid=ab&fp=chrome&flow=xtls-rprx-vision#Node%20B",
+    "vless-grpc": f"vless://{UUID}@c.example.com:443?type=grpc&serviceName=svc&security=tls#grpc",
+    "trojan": "trojan://secretpw@t.example.com:443?sni=t.example.com&type=ws&path=%2Ft#Trojan",
+    "ss-sip002": "ss://" + base64.urlsafe_b64encode(b"aes-256-gcm:pw123").decode().rstrip("=") + "@s.example.com:8388#SS",
+    "ss-legacy": "ss://" + base64.b64encode(b"chacha20-ietf-poly1305:pw@l.example.com:8389").decode() + "#Legacy",
+    "hy2": "hysteria2://authpw@h.example.com:443?sni=h.example.com&obfs=salamander&obfs-password=op&insecure=1#Hy2",
+    "hy1": "hysteria://hy.example.com:443?auth=a&upmbps=20&downmbps=80&peer=hy.example.com#Hy1",
+    "tuic": f"tuic://{UUID}:pw@tu.example.com:443?congestion_control=bbr&alpn=h3&sni=tu.example.com#TUIC",
+    "anytls": "anytls://pw@at.example.com:443?sni=at.example.com#AnyTLS",
+    "socks": "socks5://u:p@sk.example.com:1080#Socks",
+}
+VMESS_JSON = {"v": "2", "ps": "VMess WS", "add": "v.example.com", "port": "443", "id": UUID, "aid": "0",
+              "scy": "auto", "net": "ws", "type": "none", "host": "v.example.com", "path": "/v", "tls": "tls", "sni": "v.example.com"}
+LINKS["vmess"] = "vmess://" + base64.b64encode(json.dumps(VMESS_JSON).encode()).decode()
+
+CLASH = """
+proxies:
+  - {name: "clash-vless", type: vless, server: c1.example.com, port: 443, uuid: %s, tls: true, network: ws, ws-opts: {path: /w, headers: {Host: c1.example.com}}}
+  - {name: "clash-ss", type: ss, server: c2.example.com, port: 8388, cipher: aes-128-gcm, password: pw}
+  - {name: "clash-hy2", type: hysteria2, server: c3.example.com, port: 443, password: pw, sni: c3.example.com}
+  - {name: "clash-kcp", type: vmess, server: c4.example.com, port: 443, uuid: %s, alterId: 0, cipher: auto, network: kcp}
+""" % (UUID, UUID)
 
 
 def fresh():
-    return Store(Path(tempfile.mkdtemp()))
+    return Supervisor(Store(Path(tempfile.mkdtemp())), dry_run=True)
 
 
-class Parsers(unittest.TestCase):
-    def test_wireguard(self):
+class Links(unittest.TestCase):
+    def test_every_link_scheme_parses_to_a_singbox_outbound(self):
+        expect = {"vless-ws": "vless", "vless-reality": "vless", "vless-grpc": "vless", "trojan": "trojan",
+                  "ss-sip002": "shadowsocks", "ss-legacy": "shadowsocks", "hy2": "hysteria2", "hy1": "hysteria",
+                  "tuic": "tuic", "anytls": "anytls", "socks": "socks", "vmess": "vmess"}
+        for k, typ in expect.items():
+            e = parsers.parse_link(LINKS[k])
+            self.assertEqual(e["outbound"]["type"], typ, k)
+            self.assertTrue(e["outbound"]["server"] and e["outbound"]["server_port"], k)
+
+    def test_details(self):
+        ws = parsers.parse_link(LINKS["vless-ws"])
+        self.assertEqual(ws["outbound"]["transport"]["type"], "ws")
+        self.assertEqual(ws["country"], "DE")  # from the flag emoji
+        re_ = parsers.parse_link(LINKS["vless-reality"])["outbound"]
+        self.assertEqual(re_["tls"]["reality"]["public_key"], "PUB")
+        self.assertEqual(re_["flow"], "xtls-rprx-vision")
+        hy2 = parsers.parse_link(LINKS["hy2"])["outbound"]
+        self.assertEqual(hy2["obfs"], {"type": "salamander", "password": "op"})
+        self.assertTrue(hy2["tls"]["insecure"])
+        ss = parsers.parse_link(LINKS["ss-sip002"])["outbound"]
+        self.assertEqual((ss["method"], ss["password"]), ("aes-256-gcm", "pw123"))
+        ss2 = parsers.parse_link(LINKS["ss-legacy"])["outbound"]
+        self.assertEqual((ss2["server"], ss2["server_port"]), ("l.example.com", 8389))
+        vm = parsers.parse_link(LINKS["vmess"])["outbound"]
+        self.assertEqual(vm["transport"]["path"], "/v")
+        self.assertEqual(vm["tls"]["server_name"], "v.example.com")
+
+    def test_unsupported_transport_is_reported_not_silently_dropped(self):
+        link = f"vless://{UUID}@x.example.com:443?type=xhttp&security=tls#X"
+        with self.assertRaises(parsers.Unsupported):
+            parsers.parse_link(link)
+        exits, skipped = parsers.parse_subscription(link + "\n" + LINKS["trojan"])
+        self.assertEqual(len(exits), 1)
+        self.assertEqual(len(skipped), 1)
+
+
+class Subscriptions(unittest.TestCase):
+    def test_base64_and_dedupe(self):
+        body = base64.b64encode("\n".join([LINKS["vless-ws"], LINKS["vless-ws"], LINKS["trojan"]]).encode()).decode()
+        exits, _ = parsers.parse_subscription(body, "sub:x")
+        self.assertEqual(len(exits), 3)
+        self.assertEqual(len({e["id"] for e in exits}), 3)
+        self.assertTrue(all(e["provider"] == "sub:x" for e in exits))
+
+    def test_clash_yaml(self):
+        exits, skipped = parsers.parse_subscription(CLASH)
+        self.assertEqual([e["protocol"] for e in exits], ["vless", "shadowsocks", "hysteria2"])
+        self.assertEqual(exits[0]["outbound"]["transport"]["path"], "/w")
+        self.assertEqual(len(skipped), 1)  # mKCP
+
+    def test_singbox_json(self):
+        doc = {"outbounds": [{"type": "direct", "tag": "direct"}, {"type": "selector", "tag": "s", "outbounds": []},
+                             {"type": "trojan", "tag": "my-trojan", "server": "j.example.com", "server_port": 443, "password": "p"}]}
+        exits, _ = parsers.parse_subscription(json.dumps(doc))
+        self.assertEqual(len(exits), 1)
+        self.assertEqual(exits[0]["name"], "my-trojan")
+
+
+class Files(unittest.TestCase):
+    def test_wireguard_and_ovpn_meta(self):
         e = parsers.parse_wireguard(WG, "Surfshark DE")
-        self.assertEqual(e["server"], "de-1.example.com")
-        self.assertEqual(e["server_port"], 51820)
-        self.assertEqual(e["address"], ["10.14.0.2/16"])
+        self.assertEqual(e["endpoint"]["peers"][0]["port"], 51820)
+        u = parsers.parse_ovpn(OVPN.format(proto="udp", host="de-fra.prod.surfshark.com"), "de-fra_udp")
+        t = parsers.parse_ovpn(OVPN.format(proto="tcp-client", host="de-fra.prod.surfshark.com"), "de-fra_tcp")
+        self.assertEqual((u["transport"], t["transport"]), ("udp", "tcp"))
+        self.assertEqual((u["provider"], u["country"], u["needs_auth"]), ("surfshark", "DE", True))
 
-    def test_subscription_base64_and_dedupe(self):
-        body = base64.b64encode(("\n".join([VLESS_WS, VLESS_RE, VLESS_WS, "vmess://ignored"])).encode()).decode()
-        ex = parsers.parse_subscription(body)
-        self.assertEqual(len(ex), 3)
-        self.assertEqual(len({e["id"] for e in ex}), 3)
-
-    def test_ovpn_remote(self):
-        self.assertEqual(parsers.parse_ovpn_remote("client\nremote vpn.corp.example 443 tcp\n"), ("vpn.corp.example", 443))
+    def test_folder_and_zip_import(self):
+        sup = fresh()
+        d = Path(tempfile.mkdtemp())
+        for n, proto in (("us-nyc_udp", "udp"), ("us-nyc_tcp", "tcp")):
+            (d / f"{n}.ovpn").write_text(OVPN.format(proto=proto, host="us-nyc.prod.surfshark.com"))
+        (d / "Windscribe-DE.conf").write_text(WG)
+        (d / "junk.txt").write_text("ignore me")
+        r = sup.import_path(str(d))
+        self.assertEqual(r["added"], {"openvpn": 2, "wireguard": 1})
+        z = d / "pack.zip"
+        with zipfile.ZipFile(z, "w") as zf:
+            zf.writestr("ca-tor_udp.ovpn", OVPN.format(proto="udp", host="ca-tor.prod.surfshark.com"))
+        self.assertEqual(sup.import_path(str(z))["added"]["openvpn"], 1)
+        mode = Path(next(e["ovpn_path"] for e in sup.store.data["exits"].values() if e["kind"] == "openvpn")).stat().st_mode & 0o777
+        self.assertEqual(mode, 0o600)
 
 
 class Build(unittest.TestCase):
     def setUp(self):
-        self.st = fresh()
-        self.st.add_exits([parsers.parse_wireguard(WG, "Surfshark DE")])
-        self.st.add_exits(parsers.parse_subscription(VLESS_WS + "\n" + VLESS_RE))
+        self.sup = fresh()
+        self.st = self.sup.store
+        self.st.add_exits([parsers.parse_wireguard(WG, "Surfshark-DE", "surfshark"),
+                           parsers.parse_wireguard(WG.replace("de-1", "nl-1"), "Windscribe-NL", "windscribe")])
+        exits, _ = parsers.parse_subscription("\n".join([LINKS["vless-ws"], LINKS["trojan"], LINKS["hy2"]]), "sub:s1")
+        self.st.add_exits(exits)
+        self.sup.import_ovpn(OVPN.format(proto="udp", host="198.51.100.7"), "de-fra_udp", "surfshark")
+        self.d = self.st.data
 
-    def test_selector_contains_every_exit_and_default(self):
-        cfg = singbox.build(self.st.data)
-        sel = next(o for o in cfg["outbounds"] if o["tag"] == "global")
-        self.assertIn("Surfshark-DE", sel["outbounds"])
-        self.assertIn("auto-vless", sel["outbounds"])
-        self.assertEqual(sel["default"], "Surfshark-DE")  # first selectable becomes global
-        self.assertEqual(cfg["endpoints"][0]["type"], "wireguard")
+    def cfg(self):
+        return singbox.build(self.d)
 
-    def test_swap_global_is_one_field(self):
-        a = singbox.build(self.st.data)
-        self.st.data["global"] = "Node-A"
-        b = singbox.build(self.st.data)
-        a["outbounds"] = [o for o in a["outbounds"] if o["tag"] != "global"]
-        b["outbounds"] = [o for o in b["outbounds"] if o["tag"] != "global"]
-        self.assertEqual(a, b)  # nothing but the selector default changes
+    def test_all_kinds_reach_the_selector(self):
+        sel = next(o for o in self.cfg()["outbounds"] if o["tag"] == "global")["outbounds"]
+        for m in ("Surfshark-DE", "ovpn", "direct", "auto:sub:s1"):
+            self.assertIn(m, sel)
+        self.assertTrue(any(m.startswith("Node") or m == "Trojan" for m in sel))
 
-    def test_iran_goes_direct_and_final_is_global(self):
-        cfg = singbox.build(self.st.data)
-        iran = [r for r in cfg["route"]["rules"] if r.get("domain_suffix") == [".ir"]][0]
-        self.assertEqual(iran["outbound"], "direct")
-        self.assertEqual(cfg["route"]["final"], "global")
+    def test_wireguard_only_favorites_and_selected_are_loaded(self):
+        self.d["global"] = "Surfshark-DE"
+        self.assertEqual([e["tag"] for e in self.cfg()["endpoints"]], ["Surfshark-DE"])
+        self.d["favorites"] = ["Windscribe-NL"]
+        self.assertEqual(sorted(e["tag"] for e in self.cfg()["endpoints"]), ["Surfshark-DE", "Windscribe-NL"])
 
-    def test_corp_rules_precede_private_direct(self):
-        d = self.st.data
-        d["corp"].update(enabled=True, ovpn_path="/x.ovpn", server="203.0.113.5", dns="192.168.100.1")
-        d["routes"][1]["domain_suffix"] = [".corp.example"]
-        d["routes"][1]["ip_cidr"] = ["192.168.100.0/24"]
-        cfg = singbox.build(d)
+    def test_openvpn_global_binds_interface_and_bypasses_its_server(self):
+        self.d["global"] = "de-fra_udp"
+        cfg = self.cfg()
+        ov = next(o for o in cfg["outbounds"] if o["tag"] == "ovpn")
+        self.assertEqual(ov["bind_interface"], "rr-vpn0")
+        self.assertEqual(next(o for o in cfg["outbounds"] if o["tag"] == "global")["default"], "ovpn")
+        self.assertTrue(any(r.get("ip_cidr") == ["198.51.100.7"] and r["outbound"] == "direct" for r in cfg["route"]["rules"]))
+
+    def test_swap_global_changes_only_the_selector_default_and_loaded_endpoint(self):
+        self.d["global"] = "Surfshark-DE"
+        a = self.cfg()
+        self.d["global"] = "Trojan"
+        b = self.cfg()
+        for c in (a, b):
+            c["outbounds"] = [o for o in c["outbounds"] if o["tag"] != "global"]
+            c.pop("endpoints")
+        self.assertEqual(a, b)
+
+    def test_iran_direct_final_global_and_corp_precedes_private(self):
+        self.d["corp"].update(enabled=True, ovpn_path="/x.ovpn", server="203.0.113.5", dns="192.168.100.1")
+        self.d["routes"][1].update(domain_suffix=[".corp.example"], ip_cidr=["192.168.100.0/24"])
+        cfg = self.cfg()
         rules = cfg["route"]["rules"]
+        self.assertEqual(cfg["route"]["final"], "global")
+        self.assertEqual(next(r for r in rules if r.get("domain_suffix") == [".ir"])["outbound"], "direct")
         corp_i = next(i for i, r in enumerate(rules) if r.get("outbound") == "corp")
         priv_i = next(i for i, r in enumerate(rules) if r.get("ip_is_private"))
         self.assertLess(corp_i, priv_i)
-        self.assertTrue(any(o.get("bind_interface") == "tun-corp" for o in cfg["outbounds"]))
-        # company server stays off the tunnel
-        self.assertTrue(any(r.get("ip_cidr") == ["203.0.113.5"] and r["outbound"] == "direct" for r in rules))
-        self.assertTrue(any(s["tag"] == "dns-corp" for s in cfg["dns"]["servers"]))
 
-    def test_corp_disabled_never_references_corp_outbound(self):
-        d = self.st.data
-        d["routes"][1]["domain_suffix"] = [".corp.example"]
-        cfg = singbox.build(d)
+    def test_every_rule_references_an_existing_outbound(self):
+        self.d["routes"][0]["exit"] = "Windscribe-NL"  # pinned but not loaded -> falls back to global
+        cfg = self.cfg()
         tags = {o["tag"] for o in cfg["outbounds"]} | {e["tag"] for e in cfg["endpoints"]}
         for r in cfg["route"]["rules"]:
             if "outbound" in r:
                 self.assertIn(r["outbound"], tags)
 
-    def test_no_secrets_in_public_view(self):
+    def test_public_view_has_no_secrets(self):
+        self.d["providers"]["surfshark"].update(username="svc-user", password="svc-pass-123")
         pub = json.dumps(self.st.public())
-        self.assertNotIn("AAAA", pub)
-        self.assertNotIn("11111111-2222", pub)
-        self.assertNotIn(self.st.data["api_secret"], pub)
-        self.assertNotIn(self.st.data["ui_token"], pub)
+        for secret in ("AAAA", UUID, "secretpw", "authpw", "svc-pass-123", self.d["api_secret"], self.d["ui_token"], "profiles/"):
+            self.assertNotIn(secret, pub)
+        self.assertTrue(self.st.public()["providers"]["surfshark"]["has_credentials"])
 
-    def test_state_file_is_private(self):
+    def test_state_file_is_private_and_removal_repoints_routes(self):
         self.st.save()
         self.assertEqual(self.st.path.stat().st_mode & 0o777, 0o600)
+        self.d["routes"][0]["exit"] = "Surfshark-DE"
+        self.st.remove_exit("Surfshark-DE")
+        self.assertEqual(self.d["routes"][0]["exit"], "global")
 
-    def test_removing_exit_repoints_routes(self):
-        self.st.data["routes"][0]["exit"] = "Node-A"
-        self.st.remove_exit("Node-A")
-        self.assertEqual(self.st.data["routes"][0]["exit"], "global")
+
+class Rollback(unittest.TestCase):
+    def test_config_hash_ignores_selector_default_and_secret(self):
+        sup = fresh()
+        sup.store.add_exits([parsers.parse_wireguard(WG, "A"), parsers.parse_wireguard(WG, "B")])
+        sup.store.data["global"] = "A"
+        h1 = sup.config_hash(sup.build())
+        sup.store.data["global"] = "B"
+        sup.store.data["api_secret"] = "other"
+        self.assertNotEqual(h1, sup.config_hash(sup.build()))  # B is loaded instead of A -> really different config
+        sup.store.data["favorites"] = ["A", "B"]
+        h2 = sup.config_hash(sup.build())
+        sup.store.data["global"] = "A"
+        self.assertEqual(h2, sup.config_hash(sup.build()))  # same loaded set, only the default moved
 
 
 if __name__ == "__main__":
