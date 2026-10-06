@@ -85,7 +85,7 @@ def kill_leftovers(state_dir: Path) -> list[str]:
             cmd = Path(f"/proc/{pid}/cmdline").read_bytes().decode(errors="replace")
         except OSError:
             continue
-        if not any(name in cmd for name in ("sing-box", "openvpn")):
+        if not any(name in cmd for name in ("sing-box", "openvpn", "xray")):
             continue
         try:
             os.kill(pid, signal.SIGTERM)

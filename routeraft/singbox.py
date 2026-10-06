@@ -11,6 +11,8 @@ from __future__ import annotations
 import ipaddress
 from pathlib import Path
 
+from . import xray
+
 MATCH_KEYS = ("domain_suffix", "domain", "ip_cidr", "rule_set", "process_name")
 IKE_IFACE = "rr-ike0"
 
@@ -44,10 +46,12 @@ def loaded_wireguard(state: dict) -> set[str]:
     return (set(state["favorites"]) | {state["global"]}) & wg
 
 
-def build(state: dict, rule_dir: Path | None = None) -> dict:
+def build(state: dict, rule_dir: Path | None = None, xray_ok: bool = True) -> dict:
     st, exits, corp = state["settings"], state["exits"], state["corp"]
     corp_on = bool(corp.get("enabled") and corp.get("ovpn_path"))
-    sb_ids = [i for i, e in exits.items() if e["kind"] == "singbox"]
+    # Xray-engine nodes are reached through a loopback SOCKS port; without an Xray binary they are left out entirely
+    # rather than appearing as exits that can never connect.
+    sb_ids = [i for i, e in exits.items() if e["kind"] == "singbox" or (e["kind"] == "xray" and xray_ok)]
     wg_ids = sorted(loaded_wireguard(state))
     has_ovpn = any(e["kind"] == "openvpn" for e in exits.values())
     has_ike = any(e["kind"] == "ikev2" for e in exits.values())
@@ -55,7 +59,10 @@ def build(state: dict, rule_dir: Path | None = None) -> dict:
     outbounds = [{"type": "direct", "tag": "direct"}]
     endpoints = []
     for i in sb_ids:
-        outbounds.append({**exits[i]["outbound"], "tag": i})
+        if exits[i]["kind"] == "xray":
+            outbounds.append({"type": "socks", "tag": i, "server": xray.LISTEN, "server_port": xray.port_for(state, i), "version": "5"})
+        else:
+            outbounds.append({**exits[i]["outbound"], "tag": i})
     for i in wg_ids:
         endpoints.append({**exits[i]["endpoint"], "tag": i})
 
@@ -109,7 +116,7 @@ def build(state: dict, rule_dir: Path | None = None) -> dict:
     dns_rules: list[dict] = []
 
     # keep VPN transports off the tunnel (no VPN-in-VPN loop)
-    route_rules.append({"process_name": ["openvpn", "charon", "stunnel4", "stunnel", "wstunnel"],
+    route_rules.append({"process_name": ["openvpn", "charon", "stunnel4", "stunnel", "wstunnel", "xray"],
                         "action": "route", "outbound": "direct"})
     bypass: list[str] = []
     g = exits.get(state["global"])
@@ -165,7 +172,7 @@ def build(state: dict, rule_dir: Path | None = None) -> dict:
         tun["route_exclude_address"] = st["tun_exclude"]
 
     return {
-        "log": {"level": "info", "timestamp": True},
+        "log": {"level": st.get("log_level", "info"), "timestamp": True},
         "dns": {"servers": dns_servers, "rules": dns_rules, "final": "dns-global",
                 "strategy": "prefer_ipv4" if st["ipv6"] else "ipv4_only"},
         "inbounds": [tun],

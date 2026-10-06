@@ -305,7 +305,9 @@ function say(id, res, okText = "Done") {
   el.textContent = t;
 }
 const PROTO = { vless: "VLESS", vmess: "VMess", trojan: "Trojan", shadowsocks: "Shadowsocks", hysteria: "Hysteria", hysteria2: "Hysteria2", tuic: "TUIC", anytls: "AnyTLS", socks: "SOCKS5", http: "HTTP" };
-const KIND = e => e.kind === "openvpn" ? `OpenVPN ${e.transport.toUpperCase()}` : e.kind === "wireguard" ? "WireGuard" : (PROTO[e.protocol] || e.protocol);
+const SHOWN_TRANSPORT = new Set(["ws", "grpc", "xhttp", "kcp", "quic", "httpupgrade", "h2"]);
+const KIND = e => e.kind === "openvpn" ? `OpenVPN ${e.transport.toUpperCase()}` : e.kind === "wireguard" ? "WireGuard"
+  : (PROTO[e.protocol] || e.protocol) + (SHOWN_TRANSPORT.has(e.transport) ? ` · ${e.transport.toUpperCase()}` : "");
 const PROV = e => e.provider.startsWith("sub:") ? (S.state.subscriptions[e.provider.slice(4)]?.name || e.provider.slice(4)) : e.provider;
 const cap = s => s.charAt(0).toUpperCase() + s.slice(1);
 
@@ -338,7 +340,9 @@ function render() {
   $("gSub").textContent = g ? `${KIND(g)} · ${g.country || cap(PROV(g))}` : auto ? "Lowest-latency node of the selected subscription" : "All non-matching traffic uses your normal connection";
 
   const n = $("notice"), hl = status.health || {};
-  const msg = status.event || (up && hl.ok === false && hl.failures >= 2 && !state.global_paused ? `The global exit is not responding (${hl.failures} failed checks). Use the switch below to bypass it, or pick another exit.` : "");
+  const needX = Object.values(state.exits).filter(e => e.kind === "xray").length;
+  const xrayMsg = needX && !status.xray_installed ? `${needX} node${needX === 1 ? "" : "s"} in your subscriptions need Xray (XHTTP or VLESS Encryption), which is not installed. They are hidden until it is.` : "";
+  const msg = status.event || xrayMsg || (up && hl.ok === false && hl.failures >= 2 && !state.global_paused ? `The global exit is not responding (${hl.failures} failed checks). Use the switch below to bypass it, or pick another exit.` : "");
   n.textContent = msg; n.classList.toggle("show", !!msg);
   renderPaths(); renderExits(); renderSubs(); renderProviders();
   if (!$("v-corporate").contains(document.activeElement)) { $("cPath").value = state.corp.ovpn_path; $("cDns").value = state.corp.dns; $("cOn").checked = state.corp.enabled; }

@@ -11,7 +11,7 @@ cd "$(dirname "$0")/.."
 IMAGE="${SANDBOX_IMAGE:-debian:12}"
 # Callers (e.g. sandbox-sub.sh) may swap the in-container command and add read-only mounts.
 read -r -a INSIDE <<< "${SANDBOX_INSIDE:-bash /work/scripts/sandbox-inside.sh}"
-EXTRA_MOUNTS=(); [ -n "${SANDBOX_MOUNT:-}" ] && EXTRA_MOUNTS=(-v "$SANDBOX_MOUNT") && EXTRA_MOUNTS+=(-e NODE_LIMIT="${NODE_LIMIT:-12}")
+EXTRA_MOUNTS=(); [ -n "${SANDBOX_MOUNT:-}" ] && EXTRA_MOUNTS=(-v "$SANDBOX_MOUNT") && EXTRA_MOUNTS+=(-e NODE_LIMIT="${NODE_LIMIT:-12}" -e SB_LOG="${SB_LOG:-info}")
 
 # PID 1 inside the container must reap orphaned children (a SIGKILLed sing-box would otherwise linger as a
 # zombie and confuse the checks). `docker --init` is not usable here because /usr is replaced by the host's.

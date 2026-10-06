@@ -80,7 +80,7 @@ def make_handler(store: Store, sup: Supervisor):
             if path == "/api/providers/status":
                 return self._send(200, providers.all_status())
             if path == "/api/logs":
-                return self._send(200, {k: sup.logs(k) for k in ("sing-box", "vpn", "corp")})
+                return self._send(200, {k: sup.logs(k) for k in ("sing-box", "xray", "vpn", "corp")})
             self._send(404, {"error": "not found"})
 
         def do_POST(self):

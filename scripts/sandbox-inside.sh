@@ -104,9 +104,44 @@ R=$(api /api/panic); echo "$R" | grep -q '"ok": true' && ok "POST /api/panic ok"
 wait_for 8 bash -c "$(declare -f clean rules has_tun); clean" && ok "clean after panic button" || no "leftovers after panic button"
 kill "$DPID" 2>/dev/null
 
+echo; echo "[8] Xray engine: a real VLESS + XHTTP + ML-KEM server in the sandbox, reached through sing-box"
+if ! command -v xray >/dev/null; then
+  skip "xray is not installed; engine test skipped"
+else
+  UUID_T=3f2c1d9e-7b4a-4e58-9a6d-2b1f0c8e5a77
+  KEYS=$(xray vlessenc 2>/dev/null | awk '/ML-KEM-768/{f=1} f && /"decryption"|"encryption"/{print}')
+  DEC=$(echo "$KEYS" | grep -m1 '"decryption"' | sed 's/.*": "//; s/".*//')
+  ENC=$(echo "$KEYS" | grep -m1 '"encryption"' | sed 's/.*": "//; s/".*//')
+  printf '%s' "{\"log\":{\"loglevel\":\"warning\"},\"inbounds\":[{\"listen\":\"127.0.0.1\",\"port\":44443,\"protocol\":\"vless\",\"settings\":{\"clients\":[{\"id\":\"$UUID_T\"}],\"decryption\":\"$DEC\"},\"streamSettings\":{\"network\":\"xhttp\",\"security\":\"none\",\"xhttpSettings\":{\"path\":\"/probe\",\"mode\":\"auto\"}}}],\"outbounds\":[{\"protocol\":\"freedom\"}]}" > /tmp/xray-server.json
+  start_xray_server() { xray run -c /tmp/xray-server.json >/tmp/xray-server.log 2>&1 & XSRV=$!; wait_for 10 bash -c 'exec 3<>/dev/tcp/127.0.0.1/44443'; }
+  start_xray_server && ok "local Xray server is listening (VLESS + XHTTP + ML-KEM-768)" || no "local Xray server did not start" "$(head -3 /tmp/xray-server.log)"
+
+  start_daemon
+  LINK="vless://$UUID_T@127.0.0.1:44443?type=xhttp&security=none&encryption=$ENC&path=%2Fprobe&mode=auto#local-xhttp"
+  R=$(api /api/import/subscription "{\"name\":\"loc\",\"text\":\"$LINK\"}")
+  echo "$R" | grep -q '"added": 1' && ok "link with XHTTP + ML-KEM imports as an Xray-engine exit" || no "import" "$R"
+  api /api/global '{"exit":"local-xhttp"}' >/dev/null
+  R=$(api /api/connect); echo "$R" | grep -q '"ok": true' && ok "connect starts xray, then sing-box" || no "connect" "$R"
+  api /api/confirm >/dev/null
+  [ "$(pgrep -xc xray)" -ge 2 ] && ok "xray client process is running next to the server" || no "xray client missing" "$(pgrep -xc xray) xray processes"
+  if [ $BASE_NET = 1 ]; then
+    wait_for 10 reach && ok "traffic flows: TUN -> sing-box -> SOCKS -> xray -> XHTTP/ML-KEM -> server -> internet" || no "no traffic through the Xray path" "$(tail -3 "$S/logs/xray.log" 2>/dev/null)"
+    # negative control: with the server gone the same request must fail, proving the Xray path is what carries it
+    kill "$XSRV" 2>/dev/null; wait "$XSRV" 2>/dev/null; sleep 1
+    if reach; then no "control: request still succeeded without the server (path not through Xray?)"; else ok "control: request fails when the Xray server is down"; fi
+    start_xray_server
+    wait_for 20 reach && ok "traffic resumes when the server returns" || no "did not recover when the server returned"
+  fi
+  api /api/disconnect >/dev/null; sleep 1
+  [ "$(pgrep -xc xray)" = "1" ] && ok "disconnect stops the xray client (only the test server remains)" || no "xray client survived disconnect" "$(pgrep -xc xray) xray processes"
+  wait_for 6 bash -c "$(declare -f clean rules has_tun); clean" && ok "tunnel + rules removed" || no "leftovers after disconnect"
+  kill "$XSRV" "$DPID" 2>/dev/null
+fi
+
 echo; echo "== $PASS passed, $FAIL failed, $SKIP skipped"
 if [ "$FAIL" != "0" ]; then
   echo; echo "---- sing-box log (last 25 lines) ----"; tail -25 "$S/logs/sing-box.log" 2>/dev/null
+  echo "---- xray client log (last 10 lines) ----"; tail -10 "$S/logs/xray.log" 2>/dev/null
   echo "---- daemon log (last 10 lines) ----"; tail -10 /tmp/daemon.log 2>/dev/null
 fi
 [ "$FAIL" = "0" ]

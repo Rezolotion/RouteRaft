@@ -7,6 +7,7 @@ import json
 import os
 import shutil
 import signal
+import socket
 import subprocess
 import threading
 import time
@@ -16,7 +17,7 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
-from . import cleanup, parsers, singbox
+from . import cleanup, parsers, singbox, xray
 from .config import Store
 
 SBIN = "/usr/sbin:/sbin:/usr/local/sbin:/usr/local/bin"
@@ -34,6 +35,7 @@ class Supervisor:
         self.vpn: subprocess.Popen | None = None      # active OpenVPN *global* exit
         self.vpn_exit: str = ""
         self.corp: subprocess.Popen | None = None     # company OpenVPN
+        self.xr: subprocess.Popen | None = None       # Xray engine (XHTTP / VLESS Encryption nodes)
         self.stopped_services: list[str] = []
         self.lock = threading.RLock()
         self.rollback_timer: threading.Timer | None = None
@@ -52,20 +54,30 @@ class Supervisor:
         return self.store.dir / "sing-box.json"
 
     def build(self) -> dict:
-        return singbox.build(self.store.data, self.rule_dir)
+        return singbox.build(self.store.data, self.rule_dir, xray_ok=bool(which("xray")))
 
     def config_hash(self, cfg: dict) -> str:
         c = json.loads(json.dumps(cfg))
         c["experimental"]["clash_api"].pop("secret", None)
         for o in c["outbounds"]:
             o.pop("default", None)  # picking another exit must not look like a new config
-        return hashlib.sha256(json.dumps(c, sort_keys=True).encode()).hexdigest()
+        # the Xray side is part of what the user is trusting with their traffic, so it counts too
+        blob = json.dumps(c, sort_keys=True) + json.dumps(xray.build(self.store.data), sort_keys=True)
+        return hashlib.sha256(blob.encode()).hexdigest()
+
+    @property
+    def xray_path(self) -> Path:
+        return self.store.dir / "xray.json"
 
     def write_config(self) -> tuple[Path, str]:
         cfg = self.build()
         fd = os.open(self.cfg_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w") as f:
             json.dump(cfg, f, indent=2)
+        if xray.exits_of(self.store.data):
+            fd = os.open(self.xray_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w") as f:
+                json.dump(xray.build(self.store.data), f, indent=2)
         return self.cfg_path, self.config_hash(cfg)
 
     def check_config(self) -> str | None:
@@ -73,7 +85,14 @@ class Supervisor:
         if not exe:
             return None
         p = subprocess.run([exe, "check", "-c", str(self.cfg_path)], capture_output=True, text=True, cwd=self.store.dir)
-        return None if p.returncode == 0 else (p.stderr or p.stdout).strip()
+        if p.returncode != 0:
+            return (p.stderr or p.stdout).strip()
+        xr = which("xray")
+        if xr and xray.exits_of(self.store.data):  # validate the Xray side too, before anything starts
+            q = subprocess.run([xr, "run", "-test", "-c", str(self.xray_path)], capture_output=True, text=True)
+            if q.returncode != 0:
+                return "xray rejected the config:\n" + (q.stderr or q.stdout).strip()[-600:]
+        return None
 
     def _api(self, method: str, path: str, body: dict | None = None, timeout: float = 5):
         d = self.store.data
@@ -97,6 +116,7 @@ class Supervisor:
         d = self.store.data
         s = {"running": self.running(), "corp_running": self._alive(self.corp), "vpn_running": self._alive(self.vpn),
              "singbox_installed": bool(which("sing-box")), "openvpn_installed": bool(which("openvpn")),
+             "xray_installed": bool(which("xray")), "xray_running": self._alive(self.xr),
              "dry_run": self.dry_run, "selected": d["global"],
              "rollback_in": max(0, int(self.rollback_deadline - time.time())) if self.rollback_timer else 0,
              "health": self.health, "event": self.event, "rule_sets": self.rule_set_status()}
@@ -169,6 +189,10 @@ class Supervisor:
                 if not r["ok"]:
                     self._restore_services()
                     return r
+            if xray.exits_of(self.store.data):
+                r = self._xray_up()
+                if not r["ok"]:
+                    warn = (warn + " " if warn else "") + r["error"]
             log = open(self.logdir / "sing-box.log", "ab")
             self.sb = subprocess.Popen([exe, "run", "-c", str(self.cfg_path)], cwd=self.store.dir,
                                        stdout=log, stderr=log, start_new_session=True)
@@ -216,10 +240,11 @@ class Supervisor:
             self._terminate(self.sb)
             self.sb = None
             self._vpn_down()
+            self._xray_down()
             self.corp_down()
             if self._can_touch_network():
                 cleanup.clean_network(self._ifaces())  # idempotent: a no-op after a clean exit
-            for key in ("sing-box", "openvpn-global", "openvpn-corp"):
+            for key in ("sing-box", "openvpn-global", "openvpn-corp", "xray"):
                 cleanup.forget_pid(self.store.dir, key)
             self._restore_services()
             self.health = {"ok": None, "failures": 0, "ms": None, "failover": False}
@@ -426,6 +451,35 @@ class Supervisor:
             self._vpn_down()
         return r
 
+    def _xray_up(self) -> dict:
+        """(Re)start Xray with the current node list. Cheap: outbounds connect lazily, on first use."""
+        self._xray_down()
+        exe = which("xray")
+        if not exe:
+            n = len(xray.exits_of(self.store.data))
+            return {"ok": False, "error": f"{n} node(s) need Xray, which is not installed; they are unavailable."}
+        if self.dry_run:
+            return {"ok": True}
+        log = open(self.logdir / "xray.log", "ab")
+        self.xr = subprocess.Popen([exe, "run", "-c", str(self.xray_path)], stdout=log, stderr=log, start_new_session=True)
+        cleanup.record_pid(self.store.dir, "xray", self.xr.pid)
+        first = xray.port_for(self.store.data, xray.exits_of(self.store.data)[0])
+        for _ in range(40):  # wait until the first loopback port accepts connections
+            time.sleep(0.25)
+            if self.xr.poll() is not None:
+                return {"ok": False, "error": "xray exited; see the xray log"}
+            try:
+                socket.create_connection((xray.LISTEN, first), timeout=0.5).close()
+                return {"ok": True}
+            except OSError:
+                continue
+        return {"ok": False, "error": "xray did not open its ports in 10s; see the xray log"}
+
+    def _xray_down(self) -> None:
+        self._terminate(self.xr)
+        self.xr = None
+        cleanup.forget_pid(self.store.dir, "xray")
+
     def _vpn_down(self) -> None:
         self._terminate(self.vpn)
         self.vpn, self.vpn_exit = None, ""
@@ -553,7 +607,7 @@ class Supervisor:
         return out
 
     def logs(self, name: str = "sing-box", lines: int = 200) -> str:
-        p = self.logdir / {"corp": "openvpn-corp.log", "vpn": "openvpn-global.log"}.get(name, "sing-box.log")
+        p = self.logdir / {"corp": "openvpn-corp.log", "vpn": "openvpn-global.log", "xray": "xray.log"}.get(name, "sing-box.log")
         return "\n".join(p.read_text(errors="replace").splitlines()[-lines:]) if p.exists() else ""
 
     @staticmethod

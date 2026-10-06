@@ -46,6 +46,20 @@ def trace(timeout: int = 12) -> dict:
     return dict(line.split("=", 1) for line in p.stdout.splitlines() if "=" in line)
 
 
+def log_summary(limit: int = 12) -> list[str]:
+    """Aggregate sing-box log lines with hosts, IPs and ids removed, so failures can be read without leaking anything."""
+    from collections import Counter
+    counts: Counter[str] = Counter()
+    for line in Path(STATE / "logs/sing-box.log").read_text(errors="replace").splitlines():
+        line = re.sub(r"^\S+ \d{4}-\d\d-\d\d \d\d:\d\d:\d\d ", "", line)
+        line = re.sub(r"\[\d+ \d+ms\]|\[\d+\]", "[id]", line)
+        line = re.sub(r"\b\d{1,3}(\.\d{1,3}){3}(:\d+)?\b", "<ip>", line)
+        line = re.sub(r"\b[\w-]+(\.[\w-]+)+(:\d+)?\b", "<host>", line)
+        line = re.sub(r"outbound/vless\[[^\]]*\]", "outbound/vless[node]", line)
+        counts[line[:170]] += 1
+    return [f"{n:>4} x {msg}" for msg, n in counts.most_common(limit)]
+
+
 def rules_clean() -> bool:
     rules = subprocess.run(["ip", "rule"], capture_output=True, text=True).stdout
     tun = subprocess.run(["ip", "link", "show", "rr0"], capture_output=True, text=True).returncode == 0
@@ -61,7 +75,8 @@ def main() -> int:
     sys.path.insert(0, "/work")
     from routeraft.config import Store  # noqa: E402
     st = Store(STATE)
-    st.data["settings"].update(stop_conflicting=[], rollback_seconds=0, health_interval=5, tun_exclude=[])
+    st.data["settings"].update(stop_conflicting=[], rollback_seconds=0, health_interval=5, tun_exclude=[],
+                               log_level=os.environ.get("SB_LOG", "info"))
     st.save()
 
     daemon = subprocess.Popen([sys.executable, "-m", "routeraft", "--state-dir", str(STATE), "serve"],
@@ -130,9 +145,9 @@ def main() -> int:
                   f"{t.get('loc', '-'):<5} {(str(ms) + ' ms') if ms else '-':>8}")
 
         if not working:
-            print("\nNo node carried traffic. Last sing-box errors:")
-            for line in [l for l in Path(STATE / "logs/sing-box.log").read_text().splitlines() if re.search(r"ERROR|FATAL|WARN", l)][-10:]:
-                print("      log:", mask(line[:220]))
+            print("\nNo node carried traffic. sing-box log, aggregated (hosts and ids removed):")
+            for line in log_summary():
+                print("   ", line)
             return 1
 
         # The lane proof needs a node whose exit address differs from the direct one, otherwise bypass vs tunnel

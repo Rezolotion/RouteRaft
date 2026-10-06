@@ -5,7 +5,10 @@ import unittest
 import zipfile
 from pathlib import Path
 
-from routeraft import cleanup, parsers, providers, singbox
+import shutil
+import subprocess
+
+from routeraft import cleanup, parsers, providers, singbox, xray
 from routeraft.config import Store
 from routeraft.supervisor import Supervisor
 
@@ -89,7 +92,7 @@ class Links(unittest.TestCase):
         self.assertEqual(vm["tls"]["server_name"], "v.example.com")
 
     def test_unsupported_transport_is_reported_not_silently_dropped(self):
-        link = f"vless://{UUID}@x.example.com:443?type=xhttp&security=tls#X"
+        link = f"vless://{UUID}@x.example.com:443?type=carrier-pigeon&security=tls#X"
         with self.assertRaises(parsers.Unsupported):
             parsers.parse_link(link)
         exits, skipped = parsers.parse_subscription(link + "\n" + LINKS["trojan"])
@@ -223,6 +226,73 @@ class Build(unittest.TestCase):
         self.d["routes"][0]["exit"] = "Surfshark-DE"
         self.st.remove_exit("Surfshark-DE")
         self.assertEqual(self.d["routes"][0]["exit"], "global")
+
+
+XHTTP = (f"vless://{UUID}@734169961:443?type=xhttp&security=none&encryption=mlkem768x25519plus.native.0rtt.{'A' * 43}"
+         "&path=%2Fp&host=h.example.com&mode=stream-up&extra=%7B%22xmux%22%3A%7B%22maxConcurrency%22%3A%2216%22%7D%7D#XH")
+REALITY_XHTTP = (f"vless://{UUID}@r.example.com:443?type=xhttp&security=reality&sni=x.com&pbk={'A' * 43}&sid=ab&fp=chrome"
+                 "&path=%2Fq&mode=auto#RX")
+
+
+class XrayEngine(unittest.TestCase):
+    def setUp(self):
+        self.sup = fresh()
+        self.sup.store.add_exits(parsers.parse_subscription("\n".join([XHTTP, REALITY_XHTTP, LINKS["trojan"]]), "sub:x")[0])
+        self.d = self.sup.store.data
+
+    def test_unsupported_by_singbox_becomes_an_xray_exit_not_a_skip(self):
+        exits, skipped = parsers.parse_subscription(XHTTP + "\n" + REALITY_XHTTP)
+        self.assertEqual((len(exits), len(skipped)), (2, 0))
+        e = exits[0]
+        self.assertEqual((e["kind"], e["protocol"], e["transport"]), ("xray", "vless", "xhttp"))
+        self.assertEqual(e["outbound"]["settings"]["vnext"][0]["users"][0]["encryption"][:18], "mlkem768x25519plus")
+        xs = e["outbound"]["streamSettings"]["xhttpSettings"]
+        self.assertEqual((xs["mode"], xs["extra"]["xmux"]["maxConcurrency"]), ("stream-up", "16"))
+
+    def test_numeric_hosts_are_normalised_for_every_engine(self):
+        self.assertEqual(parsers.parse_link(XHTTP)["server"], "43.194.139.105")  # decimal form of an IPv4 address
+        t = parsers.parse_link(f"vless://{UUID}@734169961:443?type=tcp&security=none#T")
+        self.assertEqual(t["outbound"]["server"], "43.194.139.105")             # sing-box would have looked it up as a domain
+        self.assertEqual(parsers.normalize_host("example.com"), "example.com")
+
+    def test_each_node_gets_its_own_loopback_socks_port(self):
+        cfg = xray.build(self.d)
+        ids = xray.exits_of(self.d)
+        self.assertEqual(len(ids), 2)
+        ports = [i["port"] for i in cfg["inbounds"]]
+        self.assertEqual(ports, [25000, 25001])
+        self.assertTrue(all(i["listen"] == "127.0.0.1" for i in cfg["inbounds"]))
+        for rule, inb, out in zip(cfg["routing"]["rules"], cfg["inbounds"], cfg["outbounds"]):
+            self.assertEqual(rule["inboundTag"], [inb["tag"]])  # a node's inbound reaches only its own outbound
+            self.assertEqual(rule["outboundTag"], out["tag"])
+
+    def test_singbox_reaches_xray_nodes_through_socks_and_bypasses_xray_itself(self):
+        cfg = singbox.build(self.d)
+        socks = [o for o in cfg["outbounds"] if o["type"] == "socks"]
+        self.assertEqual(sorted(o["server_port"] for o in socks), [25000, 25001])
+        sel = next(o for o in cfg["outbounds"] if o["tag"] == "global")["outbounds"]
+        for o in socks:
+            self.assertIn(o["tag"], sel)                       # selectable like any other exit
+        bypass = next(r for r in cfg["route"]["rules"] if "process_name" in r and r["outbound"] == "direct")
+        self.assertIn("xray", bypass["process_name"])         # otherwise Xray's own traffic would loop into the TUN
+
+    def test_without_an_xray_binary_those_nodes_are_left_out(self):
+        cfg = singbox.build(self.d, xray_ok=False)
+        self.assertFalse(any(o["type"] == "socks" for o in cfg["outbounds"]))
+        self.assertTrue(any(o["tag"] == "Trojan" for o in cfg["outbounds"]))  # sing-box nodes are unaffected
+
+    def test_secrets_stay_out_of_the_public_view(self):
+        pub = json.dumps(self.sup.store.public())
+        for secret in (UUID, "A" * 43, "mlkem768x25519plus.native"):
+            self.assertNotIn(secret, pub)
+
+    @unittest.skipUnless(shutil.which("xray") and shutil.which("sing-box"), "needs xray and sing-box installed")
+    def test_generated_configs_are_accepted_by_the_real_binaries(self):
+        self.d["global"] = xray.exits_of(self.d)[0]
+        self.sup.write_config()
+        x = subprocess.run(["xray", "run", "-test", "-c", str(self.sup.xray_path)], capture_output=True, text=True)
+        self.assertEqual(x.returncode, 0, x.stdout + x.stderr)
+        self.assertIsNone(self.sup.check_config())
 
 
 class LiveSwitches(unittest.TestCase):
