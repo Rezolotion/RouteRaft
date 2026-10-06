@@ -1,185 +1,266 @@
 <!doctype html>
-<html lang="fa" dir="rtl">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
 <title>RouteRaft</title>
 <style>
-  :root { --bg:#0f1115; --panel:#171a21; --panel2:#1e222b; --line:#2a2f3a; --text:#e7eaf0; --dim:#8b93a3;
-          --blue:#2d8cff; --green:#35d07f; --red:#c8443f; --amber:#e5b13a; }
-  @media (prefers-color-scheme: light) { :root { --bg:#f3f5f9; --panel:#fff; --panel2:#eef1f6; --line:#d5dae3; --text:#1b2030; --dim:#5f6a7e; } }
+  :root {
+    --bg:#0b1220; --surface:#111a2e; --surface-2:#16213a; --border:rgba(255,255,255,.09); --border-strong:rgba(255,255,255,.18);
+    --text:#e6eaf2; --muted:#8a94a8; --primary:#3b82f6; --on-primary:#fff; --ok:#22c55e; --warn:#f59e0b; --danger:#dc2626;
+    --ring:rgba(59,130,246,.55); --radius:12px; --sans:Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    --mono:ui-monospace, "SF Mono", "JetBrains Mono", "Fira Code", Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: light) {
+    :root { --bg:#f4f6fa; --surface:#fff; --surface-2:#eef1f7; --border:rgba(15,23,42,.1); --border-strong:rgba(15,23,42,.22);
+            --text:#0f172a; --muted:#566074; --ring:rgba(37,99,235,.45); --primary:#2563eb; }
+  }
   * { box-sizing:border-box; }
-  body { margin:0; background:var(--bg); color:var(--text); font:15px/1.6 Vazirmatn, Tahoma, system-ui, sans-serif; }
-  main { max-width:940px; margin:0 auto; padding:20px 16px 60px; }
-  header { display:flex; align-items:center; gap:12px; margin-bottom:18px; }
-  header h1 { font-size:20px; margin:0; flex:1; }
-  .dot { width:10px; height:10px; border-radius:50%; background:var(--dim); display:inline-block; margin-inline-end:6px; }
-  .dot.on { background:var(--green); box-shadow:0 0 8px var(--green); }
-  .badge { font-size:12px; color:var(--dim); }
-  .card { background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:16px; margin-bottom:16px; }
-  .card h2 { font-size:15px; margin:0 0 12px; color:var(--dim); font-weight:600; }
-  .banner { position:sticky; top:8px; z-index:5; background:var(--amber); color:#1b1500; border-radius:12px; padding:10px 14px; margin-bottom:14px;
-            display:none; align-items:center; gap:12px; font-weight:600; }
-  .banner.show { display:flex; } .banner span { flex:1; }
+  html { color-scheme:dark light; }
+  body { margin:0; background:var(--bg); color:var(--text); font:14px/1.55 var(--sans); -webkit-font-smoothing:antialiased; }
+  :focus-visible { outline:2px solid var(--ring); outline-offset:2px; border-radius:6px; }
+  .sr { position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0 0 0 0); }
 
-  .lane { display:grid; grid-template-columns:84px 1fr 120px 1fr 150px; align-items:center; margin:12px 0; direction:ltr; }
-  .node { background:var(--panel2); border:1px solid var(--line); border-radius:12px; min-height:68px; display:flex; flex-direction:column;
-          align-items:center; justify-content:center; text-align:center; padding:6px; font-size:12px; direction:rtl; }
-  .node .ico { font-size:24px; line-height:1.2; }
-  .node small { color:var(--dim); display:block; max-width:110px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-  .wire { height:3px; background:var(--blue); border-radius:2px; }
-  .wire.off { background:var(--line); } .wire.direct { background:var(--green); } .wire.corp { background:var(--amber); }
-  .ping { font-size:12px; color:var(--green); text-align:center; min-height:20px; } .ping.bad { color:var(--red); }
+  .shell { display:grid; grid-template-columns:220px 1fr; min-height:100vh; }
+  nav.side { border-right:1px solid var(--border); padding:20px 12px; position:sticky; top:0; height:100vh; display:flex; flex-direction:column; gap:4px; }
+  .brand { display:flex; align-items:center; gap:10px; padding:4px 10px 18px; font-weight:650; font-size:16px; letter-spacing:-.01em; }
+  .brand svg { color:var(--primary); }
+  nav.side a { display:flex; align-items:center; gap:10px; padding:9px 10px; border-radius:8px; color:var(--muted); text-decoration:none; font-weight:500; min-height:38px; cursor:pointer; transition:background .15s, color .15s; }
+  nav.side a:hover { background:var(--surface-2); color:var(--text); }
+  nav.side a[aria-current=page] { background:var(--surface-2); color:var(--text); box-shadow:inset 2px 0 0 var(--primary); }
+  nav.side .grow { flex:1; }
+  .side-foot { padding:10px; font-size:12px; color:var(--muted); }
 
-  button { font:inherit; border-radius:10px; padding:7px 13px; cursor:pointer; background:var(--panel2); color:var(--text); border:1px solid var(--line); }
-  button:hover { border-color:var(--blue); }
-  button.primary { background:var(--blue); color:#fff; border-color:var(--blue); }
-  button.stop { background:var(--red); color:#fff; border-color:var(--red); }
-  button.big { padding:12px 40px; font-size:16px; }
-  button.sm { padding:2px 9px; font-size:12px; }
-  .center { display:flex; justify-content:center; margin-top:8px; gap:10px; flex-wrap:wrap; }
-  select, input[type=text], input[type=password], textarea { width:100%; background:var(--panel2); color:var(--text); border:1px solid var(--line); border-radius:8px; padding:7px 9px; font:inherit; }
-  textarea { min-height:70px; resize:vertical; direction:ltr; text-align:left; font:12px ui-monospace,monospace; }
-  input[dir=ltr] { text-align:left; }
-  label.f { display:block; font-size:12px; color:var(--dim); margin-bottom:3px; }
-  .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+  main { padding:28px clamp(16px,4vw,40px) 64px; max-width:1040px; width:100%; }
+  h1 { font-size:22px; letter-spacing:-.015em; margin:0 0 4px; }
+  .sub { color:var(--muted); margin:0 0 22px; }
+  h2 { font-size:12px; font-weight:600; color:var(--muted); text-transform:uppercase; letter-spacing:.08em; margin:0 0 14px; }
+  .card { background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); padding:18px; margin-bottom:16px; }
+  .view[hidden] { display:none; }
+
+  .pill { display:inline-flex; align-items:center; gap:8px; padding:4px 12px; border-radius:99px; background:var(--surface-2); border:1px solid var(--border); font-weight:500; font-size:13px; }
+  .dot { width:8px; height:8px; border-radius:50%; background:var(--muted); }
+  .dot.on { background:var(--ok); box-shadow:0 0 0 3px rgba(34,197,94,.18); }
+
+  .hero { display:flex; align-items:center; justify-content:space-between; gap:16px; flex-wrap:wrap; }
+  .hero .state { display:flex; flex-direction:column; gap:6px; }
+  .hero .big { font-size:26px; font-weight:650; letter-spacing:-.02em; }
+
+  button { font:inherit; font-weight:500; color:var(--text); background:var(--surface-2); border:1px solid var(--border-strong); border-radius:9px; padding:8px 14px; min-height:36px; cursor:pointer; transition:background .15s, border-color .15s, opacity .15s; }
+  button:hover { border-color:var(--primary); }
+  button:disabled { opacity:.5; cursor:not-allowed; }
+  button.primary { background:var(--primary); border-color:var(--primary); color:var(--on-primary); }
+  button.danger { background:var(--danger); border-color:var(--danger); color:#fff; }
+  button.ghost { background:transparent; }
+  button.sm { min-height:28px; padding:2px 10px; font-size:12px; }
+  button.cta { min-height:44px; padding:10px 28px; font-size:15px; }
+
+  .paths { display:flex; flex-direction:column; gap:10px; margin-top:20px; }
+  .path { display:grid; grid-template-columns:160px minmax(24px,1fr) 280px minmax(24px,1fr) 190px; align-items:center; gap:0; }
+  .endpoint, .via { background:var(--surface-2); border:1px solid var(--border); border-radius:10px; padding:10px 12px; display:flex; align-items:center; gap:10px; min-height:52px; min-width:0; }
+  .endpoint svg, .via svg { flex:none; color:var(--muted); }
+  .endpoint b, .via b { font-weight:600; display:block; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .endpoint small, .via small { color:var(--muted); display:block; font-size:12px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .link { height:2px; background:var(--border-strong); position:relative; }
+  .link.live.proxy { background:var(--primary); } .link.live.direct { background:var(--ok); } .link.live.corp { background:var(--warn); }
+  .via.proxy svg { color:var(--primary); } .via.direct svg { color:var(--ok); } .via.corp svg { color:var(--warn); }
+  .latency { font:12px var(--mono); color:var(--ok); } .latency.bad { color:var(--danger); }
+
+  .banner { position:sticky; top:12px; z-index:10; display:none; align-items:center; gap:14px; background:var(--warn); color:#1a1200; border-radius:var(--radius); padding:12px 16px; margin-bottom:16px; font-weight:550; box-shadow:0 8px 24px rgba(0,0,0,.25); }
+  .banner.show { display:flex; } .banner span { flex:1; } .banner button { border-color:rgba(0,0,0,.35); color:#1a1200; background:rgba(255,255,255,.55); }
+  .banner b { font-family:var(--mono); }
+
+  input[type=text], input[type=password], select, textarea { width:100%; background:var(--surface-2); color:var(--text); border:1px solid var(--border-strong); border-radius:9px; padding:8px 11px; font:inherit; min-height:36px; }
+  input::placeholder, textarea::placeholder { color:var(--muted); opacity:.8; }
+  textarea { min-height:88px; resize:vertical; font:12px var(--mono); }
+  label.f { display:block; font-size:12px; font-weight:500; color:var(--muted); margin-bottom:5px; }
+  .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:14px; } .grid3 { display:grid; grid-template-columns:repeat(3,1fr); gap:14px; }
   .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
-  .msg { min-height:22px; font-size:13px; margin-top:8px; white-space:pre-wrap; direction:ltr; text-align:left; }
-  .msg.err { color:var(--red); } .msg.ok { color:var(--green); }
-  details summary { cursor:pointer; color:var(--dim); }
-  pre { background:var(--panel2); padding:10px; border-radius:8px; max-height:240px; overflow:auto; font-size:12px; direction:ltr; text-align:left; }
+  .grow { flex:1; min-width:0; }
+  .msg { font-size:13px; margin-top:10px; white-space:pre-wrap; font-family:var(--mono); min-height:18px; } .msg.err { color:var(--danger); } .msg.ok { color:var(--ok); }
+  .hint { color:var(--muted); font-size:12px; }
 
-  .picker { display:none; margin-top:14px; border-top:1px solid var(--line); padding-top:12px; } .picker.show { display:block; }
-  .chips { display:flex; gap:6px; flex-wrap:wrap; margin:8px 0; }
-  .chip { font-size:12px; padding:2px 10px; border-radius:99px; border:1px solid var(--line); cursor:pointer; background:var(--panel2); }
-  .chip.on { background:var(--blue); border-color:var(--blue); color:#fff; }
-  .list { max-height:360px; overflow:auto; border:1px solid var(--line); border-radius:10px; }
-  .grp { position:sticky; top:0; background:var(--panel2); padding:4px 10px; font-size:12px; color:var(--dim); border-bottom:1px solid var(--line); }
-  .item { display:flex; align-items:center; gap:8px; padding:5px 10px; border-bottom:1px solid var(--line); }
-  .item.sel { background:rgba(45,140,255,.14); }
-  .item .nm { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-  .tag { font-size:11px; padding:0 7px; border-radius:6px; background:var(--panel2); border:1px solid var(--line); color:var(--dim); direction:ltr; }
-  .star { cursor:pointer; background:none; border:0; font-size:16px; padding:0 4px; color:var(--dim); } .star.on { color:var(--amber); }
-  .route { border:1px solid var(--line); border-radius:12px; padding:12px; margin-bottom:10px; background:var(--panel2); }
-  .route .top { display:flex; gap:10px; align-items:center; margin-bottom:8px; }
-  .route .top input[type=text] { flex:1; } .route .top select { width:auto; min-width:150px; }
-  @media (max-width:640px){ .lane{grid-template-columns:60px 1fr 1fr; row-gap:8px} .lane .dest,.lane .w2{grid-column:span 3} .grid2{grid-template-columns:1fr} }
+  .toolbar { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-bottom:12px; }
+  .chips { display:flex; gap:6px; flex-wrap:wrap; }
+  .chip { font-size:12px; font-weight:500; padding:3px 11px; border-radius:99px; border:1px solid var(--border-strong); background:transparent; color:var(--muted); cursor:pointer; min-height:28px; }
+  .chip[aria-pressed=true] { background:var(--primary); border-color:var(--primary); color:#fff; }
+  .list { border:1px solid var(--border); border-radius:10px; max-height:460px; overflow:auto; background:var(--surface); }
+  .grp { position:sticky; top:0; background:var(--surface-2); padding:6px 14px; font-size:11px; font-weight:600; letter-spacing:.07em; text-transform:uppercase; color:var(--muted); border-bottom:1px solid var(--border); z-index:1; }
+  .item { display:flex; align-items:center; gap:10px; padding:6px 14px; border-bottom:1px solid var(--border); min-height:44px; }
+  .item:last-child { border-bottom:0; } .item.sel { background:rgba(59,130,246,.12); }
+  .item .nm { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-weight:500; }
+  .tag { font:11px var(--mono); padding:1px 8px; border-radius:6px; border:1px solid var(--border-strong); color:var(--muted); white-space:nowrap; }
+  .star { background:none; border:0; color:var(--muted); padding:4px; min-height:0; display:inline-flex; } .star.on { color:var(--warn); } .star:hover { color:var(--warn); }
+  .tabs { display:flex; gap:4px; border-bottom:1px solid var(--border); margin:-4px -4px 14px; }
+  .tabs button { border:0; background:none; border-radius:8px 8px 0 0; color:var(--muted); border-bottom:2px solid transparent; }
+  .tabs button[aria-selected=true] { color:var(--text); border-bottom-color:var(--primary); }
+
+  .route { border:1px solid var(--border); border-radius:10px; padding:14px; margin-bottom:12px; background:var(--surface-2); }
+  .route .top { display:flex; gap:10px; align-items:center; margin-bottom:12px; } .route .top input[type=text] { flex:1; } .route .top select { width:auto; min-width:200px; }
+  .switch { display:inline-flex; align-items:center; gap:8px; cursor:pointer; font-size:13px; }
+  pre { background:var(--surface-2); border:1px solid var(--border); padding:12px; border-radius:10px; max-height:420px; overflow:auto; font:12px/1.5 var(--mono); margin:0; }
+  .empty { padding:36px 16px; text-align:center; color:var(--muted); }
+
+  @media (max-width:860px) {
+    .shell { grid-template-columns:1fr; } nav.side { position:static; height:auto; flex-direction:row; overflow-x:auto; border-right:0; border-bottom:1px solid var(--border); padding:10px; }
+    .brand, .side-foot, nav.side .grow { display:none; } nav.side a { white-space:nowrap; }
+    .path { grid-template-columns:1fr; gap:6px; } .link { width:2px; height:14px; margin-left:22px; } .grid2, .grid3 { grid-template-columns:1fr; }
+  }
+  @media (prefers-reduced-motion: reduce) { * { transition:none !important; animation:none !important; } }
 </style>
 </head>
 <body>
-<main>
-  <header>
-    <h1>RouteRaft</h1>
-    <span class="badge"><span id="dot" class="dot"></span><span id="stext">…</span></span>
-  </header>
+<div class="shell">
+  <nav class="side" aria-label="Primary">
+    <div class="brand"><svg id="logo" width="22" height="22"></svg>RouteRaft</div>
+    <a data-view="overview" href="#overview"></a>
+    <a data-view="exits" href="#exits"></a>
+    <a data-view="routing" href="#routing"></a>
+    <a data-view="accounts" href="#accounts"></a>
+    <a data-view="corporate" href="#corporate"></a>
+    <a data-view="logs" href="#logs"></a>
+    <div class="grow"></div>
+    <div class="side-foot" id="foot"></div>
+  </nav>
 
-  <div class="banner" id="banner" role="alert">
-    <span>کانفیگ جدید است. اگر اینترنت کار می‌کند تأیید کن، وگرنه خودکار قطع می‌شود: <b id="bsecs"></b> ثانیه</span>
-    <button id="btnConfirm" class="primary">کار می‌کند ✓</button>
-    <button id="btnBail">قطع کن</button>
-  </div>
-
-  <div class="card">
-    <h2>مسیرها</h2>
-    <div class="lane">
-      <div class="node"><span class="ico">💻</span>لپ‌تاپ</div>
-      <div class="wire" id="w-global"></div>
-      <div class="node"><span class="ico">☁️</span><b id="gName">—</b><small id="gMeta"></small></div>
-      <div class="wire" id="w-global2"></div>
-      <div class="dest node"><span class="ico">🌍</span>بقیه اینترنت<small>خروجی انتخابی</small></div>
-    </div>
-    <div class="center"><button id="btnPick">تغییر خروجی…</button><span class="ping" id="ping"></span></div>
-
-    <div class="picker" id="picker">
-      <input type="text" id="q" placeholder="جستجو: کشور، نام، پروتکل…" aria-label="جستجو">
-      <div class="chips" id="chips"></div>
-      <div class="list" id="list"></div>
-      <div class="badge" id="listNote" style="margin-top:6px"></div>
+  <main>
+    <div class="banner" id="banner" role="alert">
+      <span>New configuration is live. Confirm that your connection works, or RouteRaft will disconnect automatically in <b id="bsecs">0</b>s.</span>
+      <button id="btnConfirm">Keep it</button>
+      <button id="btnBail">Disconnect now</button>
     </div>
 
-    <div class="lane">
-      <div class="node"><span class="ico">💻</span>لپ‌تاپ</div>
-      <div class="wire direct" id="w-ir"></div>
-      <div class="node"><span class="ico">🏠</span>مستقیم</div>
-      <div class="wire direct" id="w-ir2"></div>
-      <div class="dest node"><span class="ico">🇮🇷</span>سایت‌های ایرانی<small>آی‌پی ایران</small></div>
-    </div>
-    <div class="lane">
-      <div class="node"><span class="ico">💻</span>لپ‌تاپ</div>
-      <div class="wire corp" id="w-corp"></div>
-      <div class="node"><span class="ico">🏢</span>OpenVPN شرکت<small id="corpState"></small></div>
-      <div class="wire corp" id="w-corp2"></div>
-      <div class="dest node"><span class="ico">🛠</span>ابزار شرکت<small>دامنه/آی‌پی‌های مشخص</small></div>
-    </div>
-    <div class="center"><button id="btnConn" class="primary big">وصل شو</button></div>
-    <div class="msg" id="connMsg"></div>
-  </div>
-
-  <div class="card">
-    <h2>نقشه‌ی روتینگ (از بالا؛ اولین تطابق برنده است)</h2>
-    <div id="routes"></div>
-    <div class="row"><button id="addRoute">+ قانون جدید</button><button id="saveRoutes" class="primary">ذخیره و اعمال</button></div>
-    <div class="msg" id="routeMsg"></div>
-  </div>
-
-  <div class="card">
-    <h2>افزودن سرور</h2>
-    <label class="f">پوشه، فایل zip یا فایل روی همین لپ‌تاپ (.ovpn و .conf وایرگارد؛ سرف‌شارک/ویندسکرایب/هرچی)</label>
-    <div class="row">
-      <input type="text" id="impPath" dir="ltr" placeholder="/home/you/Downloads/surfshark-configs" style="flex:1">
-      <select id="impProv" style="width:auto"><option value="">تشخیص خودکار</option><option>surfshark</option><option>windscribe</option><option>manual</option></select>
-      <button id="btnImpPath" class="primary">ایمپورت</button>
-    </div>
-    <hr style="border:0;border-top:1px solid var(--line);margin:14px 0">
-    <div class="grid2">
-      <div>
-        <label class="f">V2Ray / sing-box / Clash — ساب‌سکریپشن (لینک یا متن؛ همه‌ی پروتکل‌ها)</label>
-        <input type="text" id="subName" placeholder="نام ساب" style="margin-bottom:6px">
-        <input type="text" id="subUrl" dir="ltr" placeholder="https://…" style="margin-bottom:6px">
-        <textarea id="subText" placeholder="یا لینک‌های vless:// vmess:// trojan:// ss:// hy2:// tuic://… یا YAML کلش یا JSON را اینجا بچسبانید"></textarea>
-        <div class="row" style="margin-top:6px"><button id="btnImpSub">وارد کردن</button></div>
-        <div id="subs" class="badge" style="margin-top:8px"></div>
+    <!-- ===================================================== Overview -->
+    <section class="view" id="v-overview">
+      <h1>Overview</h1>
+      <p class="sub">One tunnel for the whole machine. Destinations decide the exit, not the other way around.</p>
+      <div class="card">
+        <div class="hero">
+          <div class="state">
+            <span class="pill"><span class="dot" id="dot"></span><span id="stext">Disconnected</span></span>
+            <span class="big" id="gHead">—</span>
+            <span class="hint" id="gSub"></span>
+          </div>
+          <button id="btnConn" class="primary cta">Connect</button>
+        </div>
+        <div class="msg" id="connMsg" role="status"></div>
+        <div class="paths" id="paths"></div>
       </div>
-      <div>
-        <label class="f">چسباندن مستقیم WireGuard .conf یا .ovpn</label>
-        <input type="text" id="pasteName" placeholder="نام (مثلاً de-fra_udp)" style="margin-bottom:6px">
-        <textarea id="pasteText" placeholder="[Interface]… یا client / remote …"></textarea>
-        <div class="row" style="margin-top:6px"><button id="btnPaste">افزودن</button></div>
+    </section>
+
+    <!-- ======================================================== Exits -->
+    <section class="view" id="v-exits" hidden>
+      <h1>Exits</h1>
+      <p class="sub">Every server you can route through. Pick one for the global slot, or add more.</p>
+      <div class="card">
+        <div class="toolbar">
+          <input type="text" id="q" class="grow" placeholder="Search by country, name, protocol or provider" aria-label="Search exits">
+          <span class="hint" id="listNote"></span>
+        </div>
+        <div class="chips" id="chips" role="group" aria-label="Filter by protocol" style="margin-bottom:12px"></div>
+        <div class="list" id="list" role="list"></div>
       </div>
-    </div>
-    <div class="msg" id="impMsg"></div>
-  </div>
+      <div class="card">
+        <h2>Add exits</h2>
+        <div class="tabs" role="tablist" id="addTabs">
+          <button role="tab" data-tab="folder" aria-selected="true">Folder or ZIP</button>
+          <button role="tab" data-tab="sub" aria-selected="false">Subscription</button>
+          <button role="tab" data-tab="paste" aria-selected="false">Paste config</button>
+        </div>
+        <div id="t-folder">
+          <label class="f" for="impPath">Path on this machine: a folder, a .zip, or a single file of .ovpn / WireGuard .conf</label>
+          <div class="row">
+            <input type="text" id="impPath" class="grow" placeholder="/home/you/Downloads/surfshark-configs" spellcheck="false">
+            <select id="impProv" style="width:auto" aria-label="Provider"><option value="">Detect provider</option><option>surfshark</option><option>windscribe</option><option>manual</option></select>
+            <button id="btnImpPath" class="primary">Import</button>
+          </div>
+        </div>
+        <div id="t-sub" hidden>
+          <div class="grid2">
+            <div><label class="f" for="subName">Name</label><input type="text" id="subName" placeholder="My subscription"></div>
+            <div><label class="f" for="subUrl">Subscription URL</label><input type="text" id="subUrl" placeholder="https://" spellcheck="false"></div>
+          </div>
+          <label class="f" for="subText" style="margin-top:12px">Or paste share links, a Clash YAML or a sing-box JSON</label>
+          <textarea id="subText" placeholder="vless://… vmess://… trojan://… ss://… hysteria2://… tuic://…" spellcheck="false"></textarea>
+          <div class="row" style="margin-top:12px"><button id="btnImpSub" class="primary">Import</button><span class="hint">Re-importing a subscription replaces its previous nodes.</span></div>
+          <div id="subs" style="margin-top:14px"></div>
+        </div>
+        <div id="t-paste" hidden>
+          <label class="f" for="pasteName">Name</label><input type="text" id="pasteName" placeholder="de-fra_udp" style="margin-bottom:12px">
+          <label class="f" for="pasteText">WireGuard .conf or OpenVPN .ovpn</label>
+          <textarea id="pasteText" placeholder="[Interface] … or client / remote …" spellcheck="false"></textarea>
+          <div class="row" style="margin-top:12px"><button id="btnPaste" class="primary">Add</button></div>
+        </div>
+        <div class="msg" id="impMsg" role="status"></div>
+      </div>
+    </section>
 
-  <div class="card">
-    <h2>اعتبارنامه‌ی سرویس OpenVPN (نه رمز حساب اصلی)</h2>
-    <div class="grid2" id="provForm"></div>
-    <div class="msg" id="provMsg"></div>
-  </div>
+    <!-- ====================================================== Routing -->
+    <section class="view" id="v-routing" hidden>
+      <h1>Routing</h1>
+      <p class="sub">Rules are evaluated top to bottom; the first match wins. Anything unmatched goes to the global exit.</p>
+      <div class="card">
+        <div id="routes"></div>
+        <div class="row"><button id="addRoute">Add rule</button><button id="saveRoutes" class="primary">Save and apply</button></div>
+        <div class="msg" id="routeMsg" role="status"></div>
+      </div>
+    </section>
 
-  <div class="card">
-    <h2>اوپن‌وی‌پی‌ان شرکت</h2>
-    <div class="grid2">
-      <div><label class="f">مسیر فایل .ovpn</label><input type="text" id="cPath" dir="ltr"></div>
-      <div><label class="f">فایل نام‌کاربری/رمز (اختیاری، دو خط، مجوز 600)</label><input type="text" id="cAuth" dir="ltr"></div>
-      <div><label class="f">DNS شرکت (اختیاری)</label><input type="text" id="cDns" dir="ltr"></div>
-      <div><label class="f">&nbsp;</label><label><input type="checkbox" id="cOn"> فعال</label></div>
-    </div>
-    <div class="row" style="margin-top:10px"><button id="saveCorp" class="primary">ذخیره</button></div>
-    <div class="msg" id="corpMsg"></div>
-  </div>
+    <!-- ====================================================== Accounts -->
+    <section class="view" id="v-accounts" hidden>
+      <h1>Provider accounts</h1>
+      <p class="sub">Service credentials used by OpenVPN profiles. These are not your account login; use the manual OpenVPN credentials your provider shows.</p>
+      <div class="card"><div class="grid3" id="provForm"></div><div class="msg" id="provMsg" role="status"></div></div>
+    </section>
 
-  <details class="card"><summary>لاگ‌ها</summary>
-    <button id="reloadLogs" style="margin:8px 0">بازخوانی</button>
-    <pre id="logs"></pre>
-  </details>
-</main>
+    <!-- ===================================================== Corporate -->
+    <section class="view" id="v-corporate" hidden>
+      <h1>Corporate VPN</h1>
+      <p class="sub">Runs alongside the global exit and only carries traffic matched by rules that target it.</p>
+      <div class="card">
+        <div class="grid2">
+          <div><label class="f" for="cPath">OpenVPN profile (.ovpn)</label><input type="text" id="cPath" spellcheck="false"></div>
+          <div><label class="f" for="cAuth">Credentials file (optional, two lines, mode 600)</label><input type="text" id="cAuth" spellcheck="false"></div>
+          <div><label class="f" for="cDns">Corporate DNS server (optional)</label><input type="text" id="cDns" spellcheck="false"></div>
+          <div style="align-self:end"><label class="switch"><input type="checkbox" id="cOn"> Enabled</label></div>
+        </div>
+        <div class="row" style="margin-top:14px"><button id="saveCorp" class="primary">Save</button></div>
+        <div class="msg" id="corpMsg" role="status"></div>
+      </div>
+    </section>
+
+    <!-- ========================================================== Logs -->
+    <section class="view" id="v-logs" hidden>
+      <h1>Logs</h1>
+      <p class="sub">Recent output from the processes RouteRaft supervises.</p>
+      <div class="card">
+        <div class="toolbar"><div class="chips" id="logChips" role="group" aria-label="Log source"></div><button id="reloadLogs" class="sm">Refresh</button></div>
+        <pre id="logs">No output yet.</pre>
+      </div>
+    </section>
+  </main>
+</div>
 
 <script>
 const TOKEN = "__TOKEN__";
 const $ = id => document.getElementById(id);
-let S = null, routesDraft = null, filterKind = "", pickerOpen = false;
+let S = null, routesDraft = null, filterKind = "", logSource = "sing-box", view = "overview";
 
-function h(tag, props = {}, ...kids) {  // names come from untrusted subscriptions: text only, never innerHTML
+// ---------------------------------------------------------------- helpers
+const SVGNS = "http://www.w3.org/2000/svg";
+const ICONS = {
+  laptop:"M3 5h18v11H3zM1 19h22", globe:"M12 2a10 10 0 100 20 10 10 0 000-20zM2 12h20M12 2c3 3 4.5 6.5 4.5 10S15 19 12 22c-3-3-4.5-6.5-4.5-10S9 5 12 2z",
+  home:"M3 11l9-8 9 8M5 10v10h14V10M10 20v-6h4v6", building:"M4 21V4h10v17M14 9h6v12M8 8h2M8 12h2M8 16h2M17 13h0M17 17h0", server:"M4 4h16v6H4zM4 14h16v6H4zM8 7h0M8 17h0",
+  layers:"M12 3l9 5-9 5-9-5zM3 13l9 5 9-5", route:"M6 19a3 3 0 100-6 3 3 0 000 6zM18 11a3 3 0 100-6 3 3 0 000 6zM9 16h6a3 3 0 003-3V11", key:"M15 7a4 4 0 11-3.9 4.9L3 20v-3h3v-3h3l2.1-2.1A4 4 0 0115 7z",
+  file:"M6 3h9l4 4v14H6zM14 3v5h5M9 13h7M9 17h7", star:"M12 3l2.8 5.8 6.2.9-4.5 4.4 1.1 6.2L12 17.3 6.4 20.3l1.1-6.2L3 9.7l6.2-.9z", shield:"M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z",
+};
+function icon(name, size = 18, fill = false) {
+  const s = document.createElementNS(SVGNS, "svg");
+  for (const [k, v] of Object.entries({ width: size, height: size, viewBox: "0 0 24 24", fill: fill ? "currentColor" : "none", stroke: "currentColor", "stroke-width": 1.7, "stroke-linecap": "round", "stroke-linejoin": "round", "aria-hidden": "true" })) s.setAttribute(k, v);
+  const p = document.createElementNS(SVGNS, "path"); p.setAttribute("d", ICONS[name]); s.append(p); return s;
+}
+function h(tag, props = {}, ...kids) {  // DOM builder. Server names come from untrusted subscriptions: text only, never innerHTML.
   const el = document.createElement(tag);
   for (const [k, v] of Object.entries(props)) { if (k === "class") el.className = v; else if (k.startsWith("on")) el[k] = v; else el.setAttribute(k, v); }
   for (const k of kids) el.append(k instanceof Node ? k : document.createTextNode(k ?? ""));
@@ -189,133 +270,176 @@ async function api(method, path, body) {
   const r = await fetch(path, { method, headers: { "Content-Type": "application/json", "X-RouteRaft-Token": TOKEN }, body: body === undefined ? undefined : JSON.stringify(body) });
   return r.json();
 }
-function say(id, res, okText = "انجام شد") {
+function say(id, res, okText = "Done") {
   const el = $(id); el.className = "msg " + (res.ok === false ? "err" : "ok");
-  let t = res.ok === false ? (res.error || "خطا") : (res.note || okText);
-  if (res.added !== undefined) t += `\nافزوده شد: ${typeof res.added === "object" ? JSON.stringify(res.added) : res.added}`;
-  if (res.skipped_count || res.failed_count) t += `\nردشده: ${res.skipped_count || res.failed_count}\n` + [...(res.skipped || []), ...(res.failed || [])].slice(0, 5).join("\n");
+  let t = res.ok === false ? (res.error || "Something went wrong") : (res.note || okText);
+  if (res.added !== undefined) t += `\nAdded: ${typeof res.added === "object" ? Object.entries(res.added).map(([k, v]) => `${v} ${k}`).join(", ") : res.added}`;
+  const bad = res.skipped_count || res.failed_count;
+  if (bad) t += `\nSkipped ${bad}:\n  ` + [...(res.skipped || []), ...(res.failed || [])].slice(0, 5).join("\n  ");
   el.textContent = t;
 }
-
-const KIND = e => e.kind === "openvpn" ? `OpenVPN·${e.transport.toUpperCase()}` : e.kind === "wireguard" ? "WireGuard" : (e.protocol || "").toUpperCase();
+const PROTO = { vless: "VLESS", vmess: "VMess", trojan: "Trojan", shadowsocks: "Shadowsocks", hysteria: "Hysteria", hysteria2: "Hysteria2", tuic: "TUIC", anytls: "AnyTLS", socks: "SOCKS5", http: "HTTP" };
+const KIND = e => e.kind === "openvpn" ? `OpenVPN ${e.transport.toUpperCase()}` : e.kind === "wireguard" ? "WireGuard" : (PROTO[e.protocol] || e.protocol);
 const PROV = e => e.provider.startsWith("sub:") ? (S.state.subscriptions[e.provider.slice(4)]?.name || e.provider.slice(4)) : e.provider;
+const cap = s => s.charAt(0).toUpperCase() + s.slice(1);
+
+// ------------------------------------------------------------------ views
+const VIEWS = { overview: ["Overview", "layers"], exits: ["Exits", "server"], routing: ["Routing", "route"], accounts: ["Accounts", "key"], corporate: ["Corporate VPN", "building"], logs: ["Logs", "file"] };
+function setView(v) {
+  view = VIEWS[v] ? v : "overview";
+  for (const k of Object.keys(VIEWS)) $("v-" + k).hidden = k !== view;
+  document.querySelectorAll("nav.side a").forEach(a => a.dataset.view === view ? a.setAttribute("aria-current", "page") : a.removeAttribute("aria-current"));
+  if (view === "logs") loadLogs();
+}
+window.addEventListener("hashchange", () => setView(location.hash.slice(1)));
+document.querySelectorAll("nav.side a").forEach(a => { const [label, ic] = VIEWS[a.dataset.view]; a.append(icon(ic), label); });
+$("logo").replaceWith(Object.assign(icon("route", 22), { id: "logo" }));
 
 async function load() { S = await (await fetch("/api/state")).json(); render(); }
 
 function render() {
-  const { state, status } = S;
-  $("dot").className = "dot" + (status.running ? " on" : "");
-  $("stext").textContent = status.running ? "وصل است" : "قطع است" + (status.dry_run ? " (dry-run)" : "");
-  $("btnConn").textContent = status.running ? "قطع شو" : "وصل شو";
-  $("btnConn").className = "big " + (status.running ? "stop" : "primary");
-  for (const w of ["w-global", "w-global2", "w-ir", "w-ir2", "w-corp", "w-corp2"]) $(w).classList.toggle("off", !status.running);
-  $("corpState").textContent = !state.corp.enabled ? "غیرفعال" : status.corp_running ? "وصل" : "قطع";
+  const { state, status } = S, up = status.running;
+  $("dot").className = "dot" + (up ? " on" : "");
+  $("stext").textContent = up ? "Connected" : "Disconnected" + (status.dry_run ? " (dry run)" : "");
+  $("btnConn").textContent = up ? "Disconnect" : "Connect";
+  $("btnConn").className = "cta " + (up ? "danger" : "primary");
   $("banner").classList.toggle("show", status.rollback_in > 0); $("bsecs").textContent = status.rollback_in;
+  $("foot").textContent = `${Object.keys(state.exits).length} exits · ${state.routes.filter(r => r.enabled).length} rules`;
 
-  const g = state.exits[state.global];
-  const auto = (state.global || "").startsWith("auto:");
-  $("gName").textContent = g ? g.name : auto ? "خودکار (سریع‌ترین)" : "بدون تونل";
-  $("gMeta").textContent = g ? `${KIND(g)} · ${g.country || PROV(g)}` : "";
+  const g = state.exits[state.global], auto = (state.global || "").startsWith("auto:");
+  $("gHead").textContent = g ? g.name : auto ? "Fastest node" : "No tunnel";
+  $("gSub").textContent = g ? `${KIND(g)} · ${g.country || cap(PROV(g))}` : auto ? "Lowest-latency node of the selected subscription" : "All non-matching traffic uses your normal connection";
 
-  renderPicker(); renderSubs(); renderProviders();
-  if (document.activeElement.closest?.(".card") !== $("cPath").closest(".card")) {
-    $("cPath").value = state.corp.ovpn_path; $("cDns").value = state.corp.dns; $("cOn").checked = state.corp.enabled;
-  }
+  renderPaths(); renderExits(); renderSubs(); renderProviders();
+  if (!$("v-corporate").contains(document.activeElement)) { $("cPath").value = state.corp.ovpn_path; $("cDns").value = state.corp.dns; $("cOn").checked = state.corp.enabled; }
   if (!routesDraft) routesDraft = JSON.parse(JSON.stringify(state.routes));
-  renderRoutes();
+  if (!$("v-routing").contains(document.activeElement)) renderRoutes();
 }
 
-function renderPicker() {
-  $("picker").classList.toggle("show", pickerOpen);
-  if (!pickerOpen) return;
+function renderPaths() {
+  const { state, status } = S, up = status.running, g = state.exits[state.global], auto = (state.global || "").startsWith("auto:");
+  const ep = (ic, title, sub) => h("div", { class: "endpoint" }, icon(ic), h("div", { style: "min-width:0" }, h("b", {}, title), h("small", {}, sub)));
+  const via = (cls, ic, title, sub, extra) => h("div", { class: "via " + cls }, icon(ic), h("div", { style: "min-width:0;flex:1" }, h("b", {}, title), h("small", {}, sub)), extra || "");
+  const link = cls => h("div", { class: "link " + cls + (up ? " live" : "") });
+  const lat = h("span", { class: "latency", id: "ping" });
+  const change = h("button", { class: "sm ghost", onclick: () => { location.hash = "#exits"; } }, "Change");
+  const corpOn = state.corp.enabled;
+  const rows = [
+    ["proxy", ep("laptop", "This laptop", "All traffic"), via("proxy", "globe", g ? g.name : auto ? "Fastest node" : "Direct", g ? `${KIND(g)} · ${g.country || cap(PROV(g))}` : "Global exit", h("div", { class: "row", style: "gap:8px;flex:none" }, lat, change)), ep("globe", "The internet", "Everything else")],
+    ["direct", ep("laptop", "This laptop", "Domestic traffic"), via("direct", "home", "Direct", "Your ISP connection"), ep("home", "Domestic sites", ".ir and local rule sets")],
+    ["corp", ep("laptop", "This laptop", "Corporate traffic"), via("corp", "building", "Corporate VPN", !corpOn ? "Disabled" : status.corp_running ? "Connected" : "Not connected"), ep("building", "Internal tools", "Your domains and IPs")],
+  ];
+  $("paths").replaceChildren(...rows.map(([cls, a, v, b]) => h("div", { class: "path" }, a, link(cls), v, link(cls), b)));
+  pingNow();
+}
+
+// ------------------------------------------------------------------ exits
+function renderExits() {
   const { state } = S, q = $("q").value.trim().toLowerCase();
   const all = Object.values(state.exits), kinds = [...new Set(all.map(KIND))].sort();
   const chips = $("chips"); chips.replaceChildren();
-  for (const k of ["", ...kinds]) chips.append(h("span", { class: "chip" + (filterKind === k ? " on" : ""), onclick: () => { filterKind = k; renderPicker(); } }, k || "همه"));
+  for (const k of ["", ...kinds]) chips.append(h("button", { class: "chip", "aria-pressed": String(filterKind === k), onclick: () => { filterKind = k; renderExits(); } }, k || "All"));
   const fav = new Set(state.favorites);
   let rows = all.filter(e => (!filterKind || KIND(e) === filterKind) && (!q || `${e.name} ${e.country} ${PROV(e)} ${KIND(e)} ${e.server}`.toLowerCase().includes(q)));
   const total = rows.length; rows = rows.slice(0, 400);
   const list = $("list"); list.replaceChildren();
-  const pin = (id, label, meta) => list.append(h("div", { class: "item" + (state.global === id ? " sel" : "") }, h("span", { class: "nm" }, label), h("span", { class: "tag" }, meta),
-    h("button", { class: "sm", onclick: () => choose(id) }, "انتخاب")));
-  pin("direct", "بدون تونل (مستقیم)", "direct");
-  const provs = [...new Set(all.filter(e => e.provider.startsWith("sub:")).map(e => e.provider))];
-  for (const p of provs) pin("auto:" + p, `خودکار سریع‌ترین: ${PROV({ provider: p })}`, "urltest");
+  const pin = (id, label, meta) => list.append(h("div", { class: "item" + ((state.global || "direct") === id ? " sel" : ""), role: "listitem" }, h("span", { class: "nm" }, label), h("span", { class: "tag" }, meta), h("button", { class: "sm", onclick: () => choose(id) }, "Use")));
+  if (!q && !filterKind) {
+    pin("direct", "No tunnel (direct connection)", "direct");
+    for (const p of [...new Set(all.filter(e => e.provider.startsWith("sub:")).map(e => e.provider))]) pin("auto:" + p, `Fastest node · ${PROV({ provider: p })}`, "url-test");
+  }
   const groups = {};
-  for (const e of rows) (groups[`${PROV(e)} · ${e.country || "—"}`] ||= []).push(e);
+  for (const e of rows) (groups[`${cap(PROV(e))} · ${e.country || "Unknown"}`] ||= []).push(e);
   for (const [gname, items] of Object.entries(groups).sort()) {
     list.append(h("div", { class: "grp" }, gname));
     for (const e of items) {
-      const star = h("button", { class: "star" + (fav.has(e.id) ? " on" : ""), title: "علاقه‌مندی (WireGuard: بارگذاری دائم برای سوییچ سریع)", onclick: () => toggleFav(e.id) }, "★");
-      list.append(h("div", { class: "item" + (state.global === e.id ? " sel" : "") }, star, h("span", { class: "nm" }, e.name), h("span", { class: "tag" }, KIND(e)),
-        h("button", { class: "sm", onclick: () => choose(e.id) }, "انتخاب")));
+      const star = h("button", { class: "star" + (fav.has(e.id) ? " on" : ""), "aria-label": (fav.has(e.id) ? "Remove from favorites: " : "Add to favorites: ") + e.name, "aria-pressed": String(fav.has(e.id)), title: "Favorites stay loaded for instant switching", onclick: () => toggleFav(e.id) }, icon("star", 16, fav.has(e.id)));
+      list.append(h("div", { class: "item" + (state.global === e.id ? " sel" : ""), role: "listitem" }, star, h("span", { class: "nm" }, e.name), h("span", { class: "tag" }, KIND(e)), h("button", { class: "sm", onclick: () => choose(e.id) }, state.global === e.id ? "In use" : "Use")));
     }
   }
-  $("listNote").textContent = total > 400 ? `${total} مورد؛ ۴۰۰ تای اول نمایش داده شد. جستجو را دقیق‌تر کن.` : `${total} سرور`;
+  if (!list.children.length) list.append(h("div", { class: "empty" }, all.length ? "No exits match your search." : "No exits yet. Add a folder of configs, a subscription, or paste a config below."));
+  $("listNote").textContent = total > 400 ? `Showing 400 of ${total}. Refine your search.` : `${total} exit${total === 1 ? "" : "s"}`;
 }
-async function choose(id) { say("connMsg", await api("POST", "/api/global", { exit: id }), "عوض شد"); await load(); pingNow(); }
+async function choose(id) { const r = await api("POST", "/api/global", { exit: id }); say("connMsg", r, "Exit changed"); await load(); }
 async function toggleFav(id) { const f = new Set(S.state.favorites); f.has(id) ? f.delete(id) : f.add(id); await api("POST", "/api/favorites", { ids: [...f] }); load(); }
 
 function renderSubs() {
   const box = $("subs"); box.replaceChildren();
-  for (const [id, s] of Object.entries(S.state.subscriptions)) {
+  const entries = Object.entries(S.state.subscriptions);
+  if (entries.length) box.append(h("h2", {}, "Subscriptions"));
+  for (const [id, s] of entries) {
     const n = Object.values(S.state.exits).filter(e => e.provider === "sub:" + id).length;
-    box.append(h("div", { class: "row", style: "margin:3px 0" }, h("span", {}, `${s.name} (${n})`),
-      s.url ? h("button", { class: "sm", onclick: async () => { say("impMsg", await api("POST", "/api/subscription/refresh", { id }), "به‌روز شد"); load(); } }, "به‌روزرسانی") : "",
-      h("button", { class: "sm", onclick: async () => { if (confirm("حذف همه‌ی نودهای این ساب؟")) { await api("POST", "/api/exits/purge", { provider: "sub:" + id }); load(); } } }, "حذف")));
+    box.append(h("div", { class: "row", style: "margin:6px 0" }, h("span", { class: "grow" }, `${s.name} · ${n} nodes`),
+      s.url ? h("button", { class: "sm", onclick: async () => { say("impMsg", await api("POST", "/api/subscription/refresh", { id }), "Updated"); load(); } }, "Refresh") : "",
+      h("button", { class: "sm", onclick: async () => { if (confirm(`Remove all nodes from "${s.name}"?`)) { await api("POST", "/api/exits/purge", { provider: "sub:" + id }); load(); } } }, "Remove")));
   }
 }
 function renderProviders() {
   const f = $("provForm"); if (f.contains(document.activeElement)) return; f.replaceChildren();
   for (const [p, c] of Object.entries(S.state.providers)) {
-    const u = h("input", { type: "text", dir: "ltr", placeholder: "username" }); u.value = c.username || "";
-    const w = h("input", { type: "password", dir: "ltr", placeholder: c.has_credentials ? "•••••• (ذخیره شده)" : "password" });
-    const b = h("button", { onclick: async () => { say("provMsg", await api("POST", "/api/providers", { provider: p, username: u.value, password: w.value || (c.has_credentials ? undefined : "") }), "ذخیره شد"); } }, "ذخیره");
-    f.append(h("div", {}, h("label", { class: "f" }, p), u, h("div", { style: "height:6px" }), w, h("div", { style: "height:6px" }), b));
+    const u = h("input", { type: "text", id: "pu-" + p, autocomplete: "off", spellcheck: "false" }); u.value = c.username || "";
+    const w = h("input", { type: "password", id: "pw-" + p, autocomplete: "new-password", placeholder: c.has_credentials ? "Saved — leave blank to keep" : "" });
+    f.append(h("div", {}, h("label", { class: "f", for: "pu-" + p }, cap(p) + " username"), u, h("label", { class: "f", for: "pw-" + p, style: "margin-top:10px" }, "Password"), w,
+      h("div", { style: "margin-top:12px" }, h("button", { class: "primary", onclick: async () => { say("provMsg", await api("POST", "/api/providers", { provider: p, username: u.value, ...(w.value ? { password: w.value } : {}) }), `${cap(p)} credentials saved`); load(); } }, "Save"))));
   }
 }
 
+// ---------------------------------------------------------------- routing
 const lines = v => v.split("\n").map(s => s.trim()).filter(Boolean);
 function renderRoutes() {
   const box = $("routes"); box.replaceChildren();
-  const targets = [["global", "خروجی سراسری"], ["direct", "مستقیم (آی‌پی ایران)"], ["corp", "OpenVPN شرکت"],
-    ...Object.values(S.state.exits).filter(e => ["singbox", "wireguard"].includes(e.kind)).slice(0, 300).map(e => [e.id, `${e.name} · ${KIND(e)}`])];
+  const targets = [["global", "Global exit"], ["direct", "Direct (domestic IP)"], ["corp", "Corporate VPN"], ...Object.values(S.state.exits).filter(e => ["singbox", "wireguard"].includes(e.kind)).slice(0, 300).map(e => [e.id, `${e.name} · ${KIND(e)}`])];
   routesDraft.forEach((r, idx) => {
-    const area = (key, label) => { const t = h("textarea", { placeholder: label }); t.value = (r[key] || []).join("\n"); t.oninput = () => { r[key] = lines(t.value); }; return h("div", {}, h("label", { class: "f" }, label), t); };
-    const name = h("input", { type: "text" }); name.value = r.name; name.oninput = () => { r.name = name.value; };
-    const on = h("input", { type: "checkbox" }); on.checked = r.enabled; on.onchange = () => { r.enabled = on.checked; };
-    const ex = h("select", {}); for (const [v, l] of targets) ex.append(h("option", { value: v }, l)); ex.value = r.exit; ex.onchange = () => { r.exit = ex.value; };
+    const area = (key, label, ph) => { const t = h("textarea", { placeholder: ph, spellcheck: "false", id: `r${idx}-${key}` }); t.value = (r[key] || []).join("\n"); t.oninput = () => { r[key] = lines(t.value); }; return h("div", {}, h("label", { class: "f", for: t.id }, label), t); };
+    const name = h("input", { type: "text", "aria-label": "Rule name" }); name.value = r.name; name.oninput = () => { r.name = name.value; };
+    const on = h("input", { type: "checkbox", "aria-label": "Rule enabled" }); on.checked = r.enabled; on.onchange = () => { r.enabled = on.checked; };
+    const ex = h("select", { "aria-label": "Exit for this rule" }); for (const [v, l] of targets) ex.append(h("option", { value: v }, l)); ex.value = r.exit; ex.onchange = () => { r.exit = ex.value; };
     box.append(h("div", { class: "route" },
       h("div", { class: "top" }, on, name, ex,
-        h("button", { onclick: () => { if (idx) { [routesDraft[idx - 1], routesDraft[idx]] = [routesDraft[idx], routesDraft[idx - 1]]; renderRoutes(); } } }, "↑"),
-        h("button", { onclick: () => { routesDraft.splice(idx, 1); renderRoutes(); } }, "حذف")),
-      h("div", { class: "grid2" }, area("domain_suffix", "پسوند دامنه (هر خط یکی؛ .ir یا corp.example.com)"), area("ip_cidr", "آی‌پی / CIDR"),
-        area("domain", "دامنه‌ی دقیق"), area("rule_set", "rule-set (geosite-ir, geoip-ir)"))));
+        h("button", { class: "sm", "aria-label": "Move rule up", disabled: idx ? null : "", onclick: () => { [routesDraft[idx - 1], routesDraft[idx]] = [routesDraft[idx], routesDraft[idx - 1]]; renderRoutes(); } }, "Up"),
+        h("button", { class: "sm", onclick: () => { routesDraft.splice(idx, 1); renderRoutes(); } }, "Delete")),
+      h("div", { class: "grid2" },
+        area("domain_suffix", "Domain suffixes", ".ir\ncorp.example.com"), area("ip_cidr", "IP ranges (CIDR)", "192.168.100.0/24"),
+        area("domain", "Exact domains", "tools.corp.example.com"), area("rule_set", "Rule sets", "geosite-ir\ngeoip-ir"))));
   });
+  if (!routesDraft.length) box.append(h("div", { class: "empty" }, "No rules. All traffic uses the global exit."));
 }
 
-$("btnPick").onclick = () => { pickerOpen = !pickerOpen; renderPicker(); if (pickerOpen) $("q").focus(); };
-$("q").oninput = renderPicker;
-$("addRoute").onclick = () => { routesDraft.push({ id: "r" + Date.now(), name: "قانون جدید", enabled: true, exit: "global", domain_suffix: [], domain: [], ip_cidr: [], rule_set: [], process_name: [] }); renderRoutes(); };
-$("saveRoutes").onclick = async () => { say("routeMsg", await api("POST", "/api/routes", { routes: routesDraft }), "اعمال شد"); routesDraft = null; load(); };
-$("btnConn").onclick = async () => { $("connMsg").textContent = "…"; say("connMsg", await api("POST", S.status.running ? "/api/disconnect" : "/api/connect")); load(); };
+// ------------------------------------------------------------------ logs
+async function loadLogs() {
+  const l = await (await fetch("/api/logs")).json();
+  const chips = $("logChips"); chips.replaceChildren();
+  for (const k of Object.keys(l)) chips.append(h("button", { class: "chip", "aria-pressed": String(k === logSource), onclick: () => { logSource = k; loadLogs(); } }, k));
+  $("logs").textContent = l[logSource] || "No output yet.";
+}
+
+// ----------------------------------------------------------------- wiring
+$("q").oninput = renderExits;
+document.querySelectorAll("#addTabs button").forEach(b => b.onclick = () => {
+  document.querySelectorAll("#addTabs button").forEach(x => x.setAttribute("aria-selected", String(x === b)));
+  for (const t of ["folder", "sub", "paste"]) $("t-" + t).hidden = t !== b.dataset.tab;
+});
+$("addRoute").onclick = () => { routesDraft.push({ id: "r" + Date.now(), name: "New rule", enabled: true, exit: "global", domain_suffix: [], domain: [], ip_cidr: [], rule_set: [], process_name: [] }); renderRoutes(); };
+$("saveRoutes").onclick = async () => { say("routeMsg", await api("POST", "/api/routes", { routes: routesDraft }), "Rules applied"); routesDraft = null; load(); };
+$("btnConn").onclick = async () => { const b = $("btnConn"); b.disabled = true; $("connMsg").textContent = ""; say("connMsg", await api("POST", S.status.running ? "/api/disconnect" : "/api/connect"), S.status.running ? "Disconnected" : "Connected"); b.disabled = false; load(); };
 $("btnConfirm").onclick = async () => { await api("POST", "/api/confirm"); load(); };
 $("btnBail").onclick = async () => { await api("POST", "/api/disconnect"); load(); };
-$("btnImpPath").onclick = async () => { $("impMsg").textContent = "…"; say("impMsg", await api("POST", "/api/import/path", { path: $("impPath").value, provider: $("impProv").value }), "ایمپورت شد"); routesDraft = null; load(); };
-$("btnImpSub").onclick = async () => { $("impMsg").textContent = "…"; say("impMsg", await api("POST", "/api/import/subscription", { name: $("subName").value || "sub", url: $("subUrl").value, text: $("subText").value }), "وارد شد"); routesDraft = null; load(); };
-$("btnPaste").onclick = async () => { const t = $("pasteText").value; say("impMsg", await api("POST", t.includes("[Interface]") ? "/api/import/wireguard" : "/api/import/ovpn", { name: $("pasteName").value || "imported", text: t }), "اضافه شد"); $("pasteText").value = ""; load(); };
-$("saveCorp").onclick = async () => { say("corpMsg", await api("POST", "/api/corp", { ovpn_path: $("cPath").value, auth_file: $("cAuth").value, dns: $("cDns").value, enabled: $("cOn").checked }), "ذخیره شد"); load(); };
-$("reloadLogs").onclick = async () => { const l = await (await fetch("/api/logs")).json(); $("logs").textContent = Object.entries(l).map(([k, v]) => `--- ${k} ---\n${v}`).join("\n"); };
+$("btnImpPath").onclick = async () => { $("impMsg").textContent = "Importing…"; say("impMsg", await api("POST", "/api/import/path", { path: $("impPath").value, provider: $("impProv").value }), "Imported"); routesDraft = null; load(); };
+$("btnImpSub").onclick = async () => { $("impMsg").textContent = "Importing…"; say("impMsg", await api("POST", "/api/import/subscription", { name: $("subName").value || "Subscription", url: $("subUrl").value, text: $("subText").value }), "Imported"); routesDraft = null; load(); };
+$("btnPaste").onclick = async () => { const t = $("pasteText").value; say("impMsg", await api("POST", t.includes("[Interface]") ? "/api/import/wireguard" : "/api/import/ovpn", { name: $("pasteName").value || "imported", text: t }), "Added"); $("pasteText").value = ""; load(); };
+$("saveCorp").onclick = async () => { say("corpMsg", await api("POST", "/api/corp", { ovpn_path: $("cPath").value, auth_file: $("cAuth").value, dns: $("cDns").value, enabled: $("cOn").checked }), "Saved"); load(); };
+$("reloadLogs").onclick = loadLogs;
 
 async function pingNow() {
-  const el = $("ping"); if (!S.status.running || !S.state.global) { el.textContent = ""; return; }
+  const el = $("ping"); if (!el) return;
+  if (!S.status.running || !S.state.global) { el.textContent = ""; return; }
   const r = await (await fetch("/api/delay/" + encodeURIComponent(S.state.global))).json();
-  el.className = "ping" + (r.ms ? "" : " bad"); el.textContent = r.ms ? `${r.ms}ms` : "بدون پاسخ";
+  el.className = "latency" + (r.ms ? "" : " bad"); el.textContent = r.ms ? `${r.ms} ms` : "no response";
 }
 const editing = () => ["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement?.tagName);
-load().then(pingNow);
-setInterval(() => { if (!editing()) load().then(pingNow); }, 5000);  // never rebuild the DOM under the user's cursor
-setInterval(() => { if (S?.status.rollback_in) { S.status.rollback_in--; $("bsecs").textContent = S.status.rollback_in; } }, 1000);
+setView(location.hash.slice(1)); load();
+setInterval(() => { if (!editing()) load(); }, 5000);  // never rebuild the DOM under the user's cursor
+setInterval(() => { if (S?.status.rollback_in > 0) { S.status.rollback_in--; $("bsecs").textContent = S.status.rollback_in; } }, 1000);
 </script>
 </body>
 </html>

@@ -41,9 +41,9 @@ DEFAULT_STATE = {
         "dns": "",
     },
     "routes": [
-        {"id": "iran", "name": "سایت‌های ایرانی", "enabled": True, "exit": "direct",
+        {"id": "iran", "name": "Domestic (Iranian) sites", "enabled": True, "exit": "direct",
          "domain_suffix": [".ir"], "domain": [], "ip_cidr": [], "rule_set": ["geosite-ir", "geoip-ir"], "process_name": []},
-        {"id": "corp", "name": "ابزار شرکت", "enabled": True, "exit": "corp",
+        {"id": "corp", "name": "Corporate tools", "enabled": True, "exit": "corp",
          "domain_suffix": [], "domain": [], "ip_cidr": [], "rule_set": [], "process_name": []},
     ],
     "settings": {
