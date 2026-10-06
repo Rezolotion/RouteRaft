@@ -5,7 +5,7 @@ import unittest
 import zipfile
 from pathlib import Path
 
-from routeraft import cleanup, parsers, singbox
+from routeraft import cleanup, parsers, providers, singbox
 from routeraft.config import Store
 from routeraft.supervisor import Supervisor
 
@@ -316,6 +316,37 @@ class Cleanup(unittest.TestCase):
     def test_panic_in_dry_run_touches_nothing(self):
         sup = fresh()
         self.assertEqual(sup.panic(), {"ok": True})
+
+
+class Providers(unittest.TestCase):
+    WS_OUT = "windscribe-cli v2.23.12\nInternet connectivity: available\nLogin state: Logged in as user123 (Pro)\nFirewall state: Off\nConnect state: Disconnected\n"
+    WS_FAIL = "Internet connectivity: available\nLogin state: Could not log in.  Please try again.\nConnect state: Disconnected\n"
+
+    def run_with(self, out):
+        return lambda cmd, **kw: type("R", (), {"stdout": out, "returncode": 0})()
+
+    def test_parses_logged_in_and_failed_states(self):
+        ok = providers.parse_windscribe_status(self.WS_OUT)
+        self.assertTrue(ok["logged_in"] and not ok["connected"])
+        bad = providers.parse_windscribe_status(self.WS_FAIL)
+        self.assertFalse(bad["logged_in"])
+        self.assertTrue(providers.parse_windscribe_status("Connect state: Connected to DE")["connected"])
+
+    def test_missing_cli_is_reported_not_executed(self):
+        called = []
+        st = providers.provider_status("windscribe", lambda *a, **k: called.append(a), lambda _: None)
+        self.assertFalse(st["installed"])
+        self.assertEqual(called, [])
+
+    def test_only_the_read_only_status_command_ever_runs(self):
+        seen = []
+        def runner(cmd, **kw):
+            seen.append(cmd)
+            return type("R", (), {"stdout": self.WS_OUT, "returncode": 0})()
+        providers.all_status(runner, lambda c: "/usr/bin/" + c)
+        self.assertEqual(seen, [["windscribe-cli", "status"]])  # surfshark has no verified status command
+        for cmd in seen:
+            self.assertNotIn("login", cmd)
 
 
 class Rollback(unittest.TestCase):

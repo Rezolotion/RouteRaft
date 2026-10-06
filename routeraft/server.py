@@ -15,7 +15,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib import resources
 
-from . import parsers, singbox
+from . import parsers, providers, singbox
 from .config import Store
 from .supervisor import Supervisor
 
@@ -77,6 +77,8 @@ def make_handler(store: Store, sup: Supervisor):
             if m:
                 member = singbox.member_for(store.data, urllib.parse.unquote(m.group(1)))
                 return self._send(200, sup.delay(member))
+            if path == "/api/providers/status":
+                return self._send(200, providers.all_status())
             if path == "/api/logs":
                 return self._send(200, {k: sup.logs(k) for k in ("sing-box", "vpn", "corp")})
             self._send(404, {"error": "not found"})

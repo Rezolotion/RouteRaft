@@ -72,6 +72,11 @@
   .always { justify-self:end; font-size:12px; color:var(--muted); }
   .notice { display:none; margin-top:14px; padding:10px 14px; border-radius:10px; border:1px solid var(--warn); background:rgba(245,158,11,.1); font-size:13px; } .notice.show { display:block; }
   .actions { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+  .code { display:flex; align-items:center; gap:8px; background:var(--surface-2); border:1px solid var(--border); border-radius:9px; padding:6px 6px 6px 12px; font:12px var(--mono); }
+  .code code { flex:1; overflow:auto; white-space:nowrap; }
+  #cliCards .route > b { display:block; }
+  .st { display:inline-flex; gap:6px; flex-wrap:wrap; margin:8px 0 10px; } .st .tag.ok { color:var(--ok); border-color:var(--ok); } .st .tag.bad { color:var(--warn); border-color:var(--warn); }
+  .links { display:flex; gap:14px; flex-wrap:wrap; margin-top:10px; font-size:13px; } .links a { color:var(--primary); }
   .latency { font:12px var(--mono); color:var(--ok); } .latency.bad { color:var(--danger); }
 
   .banner { position:sticky; top:12px; z-index:10; display:none; align-items:center; gap:14px; background:var(--warn); color:#1a1200; border-radius:var(--radius); padding:12px 16px; margin-bottom:16px; font-weight:550; box-shadow:0 8px 24px rgba(0,0,0,.25); }
@@ -227,7 +232,12 @@
     <section class="view" id="v-accounts" hidden>
       <h1>Provider accounts</h1>
       <p class="sub">Service credentials used by OpenVPN profiles. These are not your account login; use the manual OpenVPN credentials your provider shows.</p>
-      <div class="card"><div class="grid3" id="provForm"></div><div class="msg" id="provMsg" role="status"></div></div>
+      <div class="card"><h2>Service credentials</h2><div class="grid3" id="provForm"></div><div class="msg" id="provMsg" role="status"></div></div>
+      <div class="card">
+        <div class="toolbar"><h2 style="margin:0" class="grow">Official clients</h2><button class="sm" id="btnCli">Refresh</button></div>
+        <p class="hint" style="margin-top:0">Sign in with the provider's own tool in your terminal. RouteRaft never sees your account password; it only reads the resulting status.</p>
+        <div id="cliCards" class="grid2"></div>
+      </div>
     </section>
 
     <!-- ===================================================== Corporate -->
@@ -306,6 +316,7 @@ function setView(v) {
   for (const k of Object.keys(VIEWS)) $("v-" + k).hidden = k !== view;
   document.querySelectorAll("nav.side a").forEach(a => a.dataset.view === view ? a.setAttribute("aria-current", "page") : a.removeAttribute("aria-current"));
   if (view === "logs") loadLogs();
+  if (view === "accounts") loadCli();
 }
 window.addEventListener("hashchange", () => setView(location.hash.slice(1)));
 document.querySelectorAll("nav.side a").forEach(a => { const [label, ic] = VIEWS[a.dataset.view]; a.append(icon(ic), label); });
@@ -420,6 +431,25 @@ function renderProviders() {
       h("div", { style: "margin-top:12px" }, h("button", { class: "primary", onclick: async () => { say("provMsg", await api("POST", "/api/providers", { provider: p, username: u.value, ...(w.value ? { password: w.value } : {}) }), `${cap(p)} credentials saved`); load(); } }, "Save"))));
   }
 }
+
+// --------------------------------------------------------- official clients
+async function loadCli() {
+  const box = $("cliCards"); const st = await (await fetch("/api/providers/status")).json(); box.replaceChildren();
+  for (const p of Object.values(st)) {
+    const tag = (text, cls) => h("span", { class: "tag " + (cls || "") }, text);
+    const tags = [tag(p.installed ? "Client installed" : "Client not found", p.installed ? "ok" : "bad")];
+    if (p.installed && p.logged_in !== undefined) tags.push(tag(p.logged_in ? "Signed in" : "Not signed in", p.logged_in ? "ok" : "bad"));
+    if (p.connected) tags.push(tag("Its own tunnel is connected", "bad"));
+    const copy = h("button", { class: "sm", onclick: async e => { try { await navigator.clipboard.writeText(p.login_command); e.target.textContent = "Copied"; setTimeout(() => e.target.textContent = "Copy", 1500); } catch { e.target.textContent = "Select and copy"; } } }, "Copy");
+    box.append(h("div", { class: "route" },
+      h("b", {}, p.label), h("div", { class: "st" }, ...tags),
+      p.installed ? h("div", {}, h("label", { class: "f" }, "Sign in from a terminal"), h("div", { class: "code" }, h("code", {}, p.login_command), copy)) : h("div", { class: "hint" }, "The official Linux client was not detected. You can still use manual configs and service credentials."),
+      p.login_state && !p.logged_in ? h("div", { class: "hint", style: "margin-top:8px" }, p.login_state) : "",
+      p.connected ? h("div", { class: "hint", style: "margin-top:8px;color:var(--warn)" }, "Disconnect the provider's app before using RouteRaft: it installs its own default route and would conflict.") : "",
+      h("div", { class: "links" }, ...Object.entries(p.pages).map(([label, url]) => h("a", { href: url, target: "_blank", rel: "noopener noreferrer" }, label + " ↗")))));
+  }
+}
+$("btnCli").onclick = loadCli;
 
 // ---------------------------------------------------------------- routing
 const lines = v => v.split("\n").map(s => s.trim()).filter(Boolean);
