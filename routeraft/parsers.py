@@ -381,9 +381,9 @@ def parse_subscription(body: str, provider: str = "manual") -> tuple[list[dict],
             try:
                 exits.append(parse_link(line))
             except Unsupported as e:
-                skipped.append(f"{line[:40]}…: {e}")
+                skipped.append(f"{line.split('://', 1)[0]}: {e}")  # never echo link contents: they hold credentials
             except (ValueError, KeyError, binascii.Error, TypeError) as e:
-                skipped.append(f"{line[:40]}…: invalid ({e})")
+                skipped.append(f"{line.split('://', 1)[0]}: invalid ({type(e).__name__})")
     seen: set[str] = set()
     for e in exits:
         e["provider"] = provider

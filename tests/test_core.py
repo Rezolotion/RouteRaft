@@ -95,6 +95,8 @@ class Links(unittest.TestCase):
         exits, skipped = parsers.parse_subscription(link + "\n" + LINKS["trojan"])
         self.assertEqual(len(exits), 1)
         self.assertEqual(len(skipped), 1)
+        self.assertNotIn(UUID, skipped[0])      # skipped-node messages must never echo credentials
+        self.assertNotIn("x.example.com", skipped[0])
 
 
 class Subscriptions(unittest.TestCase):
