@@ -11,6 +11,8 @@ from __future__ import annotations
 import ipaddress
 from pathlib import Path
 
+from . import xray
+
 MATCH_KEYS = ("domain_suffix", "domain", "ip_cidr", "rule_set", "process_name")
 IKE_IFACE = "rr-ike0"
 
@@ -33,16 +35,23 @@ def member_for(state: dict, exit_id: str) -> str:
     return {"openvpn": "ovpn", "ikev2": "ikev2"}.get(e["kind"], exit_id)
 
 
+def rule_tag(rule_id: str) -> str:
+    """Selector tag that carries a rule's live on/off switch."""
+    return f"rule:{rule_id}"
+
+
 def loaded_wireguard(state: dict) -> set[str]:
     """WireGuard endpoints start with sing-box, so only keep favourites + the selected one loaded."""
     wg = {i for i, e in state["exits"].items() if e["kind"] == "wireguard"}
     return (set(state["favorites"]) | {state["global"]}) & wg
 
 
-def build(state: dict, rule_dir: Path | None = None) -> dict:
+def build(state: dict, rule_dir: Path | None = None, xray_ok: bool = True) -> dict:
     st, exits, corp = state["settings"], state["exits"], state["corp"]
     corp_on = bool(corp.get("enabled") and corp.get("ovpn_path"))
-    sb_ids = [i for i, e in exits.items() if e["kind"] == "singbox"]
+    # Xray-engine nodes are reached through a loopback SOCKS port; without an Xray binary they are left out entirely
+    # rather than appearing as exits that can never connect.
+    sb_ids = [i for i, e in exits.items() if e["kind"] == "singbox" or (e["kind"] == "xray" and xray_ok)]
     wg_ids = sorted(loaded_wireguard(state))
     has_ovpn = any(e["kind"] == "openvpn" for e in exits.values())
     has_ike = any(e["kind"] == "ikev2" for e in exits.values())
@@ -50,7 +59,10 @@ def build(state: dict, rule_dir: Path | None = None) -> dict:
     outbounds = [{"type": "direct", "tag": "direct"}]
     endpoints = []
     for i in sb_ids:
-        outbounds.append({**exits[i]["outbound"], "tag": i})
+        if exits[i]["kind"] == "xray":
+            outbounds.append({"type": "socks", "tag": i, "server": xray.LISTEN, "server_port": xray.port_for(state, i), "version": "5"})
+        else:
+            outbounds.append({**exits[i]["outbound"], "tag": i})
     for i in wg_ids:
         endpoints.append({**exits[i]["endpoint"], "tag": i})
 
@@ -71,25 +83,21 @@ def build(state: dict, rule_dir: Path | None = None) -> dict:
         outbounds.append({"type": "direct", "tag": "ikev2", "bind_interface": IKE_IFACE})
         members.append("ikev2")
     members.append("direct")
-    want = member_for(state, state["global"]) if state["global"] else "direct"
+    want = "direct" if state.get("global_paused") or not state["global"] else member_for(state, state["global"])
     outbounds.append({"type": "selector", "tag": "global", "outbounds": members,
                       "default": want if want in members else "direct"})
     if corp_on:
         outbounds.append({"type": "direct", "tag": "corp", "bind_interface": corp["interface"]})
 
-    # ---- rule sets: prefer files cached by `routeraft update-rules`, else fetch via global
+    # ---- rule sets: cached files only. A remote rule set that fails to download is fatal at sing-box
+    # startup, and the download itself is unreliable on filtered networks, so RouteRaft fetches the
+    # files (see Supervisor.update_rules) and the tunnel never depends on that succeeding.
     rule_sets, known = [], set()
     for tag in sorted({s for r in state["routes"] if r["enabled"] for s in r["rule_set"]}):
-        url = st["rule_sets"].get(tag)
-        if not url:
-            continue
         local = rule_dir / f"{tag}.srs" if rule_dir else None
-        if local and local.exists():
+        if local and local.exists() and local.stat().st_size > 0:
             rule_sets.append({"tag": tag, "type": "local", "format": "binary", "path": str(local)})
-        else:
-            rule_sets.append({"tag": tag, "type": "remote", "format": "binary", "url": url,
-                              "download_detour": "global", "update_interval": "7d"})
-        known.add(tag)
+            known.add(tag)
 
     tags = {o["tag"] for o in outbounds} | {e["tag"] for e in endpoints}
 
@@ -104,16 +112,11 @@ def build(state: dict, rule_dir: Path | None = None) -> dict:
     local = ({"type": "local", "tag": "dns-direct"} if st["local_dns"] == "local"
              else {"type": "udp", "tag": "dns-direct", "server": st["local_dns"]})
     dns_servers = [local, {"type": "https", "tag": "dns-global", "server": st["remote_dns"], "detour": "global"}]
-    dns_for = {"direct": "dns-direct", "global": "dns-global"}
-    if corp_on and corp.get("dns"):
-        dns_servers.append({"type": "udp", "tag": "dns-corp", "server": corp["dns"], "detour": "corp"})
-        dns_for["corp"] = "dns-corp"
-
     route_rules = [{"action": "sniff"}, {"protocol": "dns", "action": "hijack-dns"}]
     dns_rules: list[dict] = []
 
     # keep VPN transports off the tunnel (no VPN-in-VPN loop)
-    route_rules.append({"process_name": ["openvpn", "charon", "stunnel4", "stunnel", "wstunnel"],
+    route_rules.append({"process_name": ["openvpn", "charon", "stunnel4", "stunnel", "wstunnel", "xray"],
                         "action": "route", "outbound": "direct"})
     bypass: list[str] = []
     g = exits.get(state["global"])
@@ -137,10 +140,28 @@ def build(state: dict, rule_dir: Path | None = None) -> dict:
         if not match:
             continue
         out = target(r["exit"])
-        route_rules.append({**match, "action": "route", "outbound": out})
-        dm = {k: v for k, v in match.items() if k in ("domain_suffix", "domain", "rule_set")}
-        if dm:
-            dns_rules.append({**dm, "action": "route", "server": dns_for.get(out, "dns-global")})
+        dm = {k: v for k, v in match.items() if k in ("domain_suffix", "domain")}
+        sets = [t for t in match.get("rule_set", []) if t.startswith("geosite-")]  # IP sets cannot match a DNS query
+        if sets:
+            dm["rule_set"] = sets
+        if out == "direct":
+            route_rules.append({**match, "action": "route", "outbound": "direct"})
+            if dm:
+                dns_rules.append({**dm, "action": "route", "server": "dns-direct"})
+            continue
+        # Live switch: the rule points at a selector that can flip between its target and
+        # `direct` through the clash API, with no restart and no effect on other traffic.
+        sel = rule_tag(r["id"])
+        outbounds.append({"type": "selector", "tag": sel, "outbounds": [out, "direct"],
+                          "default": "direct" if r.get("paused") else out})
+        route_rules.append({**match, "action": "route", "outbound": sel})
+        if dm:  # DNS follows the switch, so a bypassed rule never resolves through its tunnel
+            if out == "corp" and corp.get("dns"):
+                srv = {"type": "udp", "tag": f"dns-{r['id']}", "server": corp["dns"], "detour": sel}
+            else:
+                srv = {"type": "https", "tag": f"dns-{r['id']}", "server": st["remote_dns"], "detour": sel}
+            dns_servers.append(srv)
+            dns_rules.append({**dm, "action": "route", "server": srv["tag"]})
 
     route_rules.append({"ip_is_private": True, "action": "route", "outbound": "direct"})
 
@@ -151,7 +172,7 @@ def build(state: dict, rule_dir: Path | None = None) -> dict:
         tun["route_exclude_address"] = st["tun_exclude"]
 
     return {
-        "log": {"level": "info", "timestamp": True},
+        "log": {"level": st.get("log_level", "info"), "timestamp": True},
         "dns": {"servers": dns_servers, "rules": dns_rules, "final": "dns-global",
                 "strategy": "prefer_ipv4" if st["ipv6"] else "ipv4_only"},
         "inbounds": [tun],

@@ -15,6 +15,7 @@ import binascii
 import configparser
 import json
 import re
+import socket
 import urllib.parse
 from pathlib import Path
 
@@ -41,7 +42,21 @@ def _truthy(v) -> bool:
     return str(v).lower() in ("1", "true", "yes")
 
 
+def normalize_host(host: str) -> str:
+    """Resolve inet_aton forms (decimal "734169961", hex "0x2bc9a8e9", short dotted) to dotted IPv4.
+
+    Xray and the C resolver accept these; sing-box would treat them as a domain name and fail with NXDOMAIN."""
+    if host and re.fullmatch(r"(0x[0-9a-fA-F]+|\d+)(\.(0x[0-9a-fA-F]+|\d+)){0,3}", host):
+        try:
+            return socket.inet_ntoa(socket.inet_aton(host))
+        except OSError:
+            pass
+    return host
+
+
 def _exit(name: str, protocol: str, outbound: dict, transport: str = "tcp", provider: str = "manual") -> dict:
+    if "server" in outbound:
+        outbound["server"] = normalize_host(outbound["server"])
     return {
         "id": slug(name), "name": name, "kind": "singbox", "protocol": protocol, "provider": provider,
         "country": guess_country(name), "server": outbound.get("server", ""),
@@ -92,9 +107,67 @@ def _transport(q: dict, net_key: str = "type") -> tuple[dict | None, str]:
 
 
 # ------------------------------------------------------------------ links
+XRAY_ONLY_TRANSPORTS = {"xhttp", "splithttp", "kcp", "mkcp"}
+
+
+def needs_xray(q: dict) -> bool:
+    """True for features only Xray implements: XHTTP, mKCP, and VLESS Encryption (ML-KEM / X25519)."""
+    return q.get("type") in XRAY_ONLY_TRANSPORTS or q.get("encryption", "none") not in ("none", "")
+
+
+def _xray_vless(u: urllib.parse.SplitResult, q: dict, name: str) -> dict:
+    """Build an Xray outbound for a VLESS link. Xray config reference: streamSettings / xhttpSettings."""
+    net = {"splithttp": "xhttp", "mkcp": "kcp"}.get(q.get("type", "tcp"), q.get("type", "tcp") or "tcp")
+    sec = q.get("security", "none") or "none"
+    host, path = q.get("host", ""), urllib.parse.unquote(q.get("path", ""))
+    stream: dict = {"network": net, "security": sec}
+    if sec == "tls":
+        tls = {"serverName": q.get("sni") or host or u.hostname}
+        if q.get("fp"):
+            tls["fingerprint"] = q["fp"]
+        if q.get("alpn"):
+            tls["alpn"] = [a for a in urllib.parse.unquote(q["alpn"]).split(",") if a]
+        if _truthy(q.get("allowInsecure", "0")):
+            tls["allowInsecure"] = True
+        stream["tlsSettings"] = tls
+    elif sec == "reality":
+        stream["realitySettings"] = {"serverName": q.get("sni", ""), "fingerprint": q.get("fp") or "chrome", "publicKey": q.get("pbk", ""),
+                                     "shortId": q.get("sid", ""), "spiderX": urllib.parse.unquote(q.get("spx", ""))}
+    if net == "xhttp":
+        xs: dict = {"path": path or "/", "mode": q.get("mode", "auto")}
+        if host:
+            xs["host"] = host
+        if q.get("extra"):
+            try:
+                xs["extra"] = json.loads(q["extra"])
+            except json.JSONDecodeError:
+                raise ValueError("xhttp `extra` is not valid JSON")
+        stream["xhttpSettings"] = xs
+    elif net == "kcp":
+        stream["kcpSettings"] = {"header": {"type": q.get("headerType", "none")}, **({"seed": q["seed"]} if q.get("seed") else {})}
+    elif net == "ws":
+        stream["wsSettings"] = {"path": path or "/", **({"headers": {"Host": host}} if host else {})}
+    elif net == "grpc":
+        stream["grpcSettings"] = {"serviceName": q.get("serviceName", path)}
+    elif net == "httpupgrade":
+        stream["httpupgradeSettings"] = {"path": path or "/", **({"host": host} if host else {})}
+    user = {"id": urllib.parse.unquote(u.username or ""), "encryption": q.get("encryption", "none") or "none"}
+    if q.get("flow"):
+        user["flow"] = q["flow"]
+    server = normalize_host(u.hostname)
+    out = {"protocol": "vless", "settings": {"vnext": [{"address": server, "port": u.port, "users": [user]}]}, "streamSettings": stream}
+    return {"id": slug(name), "name": name, "kind": "xray", "protocol": "vless", "provider": "manual", "country": guess_country(name),
+            "server": server, "server_port": u.port, "transport": net, "outbound": out}
+
+
 def parse_vless(link: str) -> dict:
     u = urllib.parse.urlsplit(link)
     q = _q(u)
+    if needs_xray(q):
+        name = urllib.parse.unquote(u.fragment) or f"{u.hostname}:{u.port}"
+        if not (u.hostname and u.port and u.username):
+            raise ValueError("vless link missing host/port/uuid")
+        return _xray_vless(u, q, name)
     name = urllib.parse.unquote(u.fragment) or f"{u.hostname}:{u.port}"
     o = {"type": "vless", "server": u.hostname, "server_port": u.port, "uuid": urllib.parse.unquote(u.username or "")}
     if q.get("flow"):
@@ -381,9 +454,9 @@ def parse_subscription(body: str, provider: str = "manual") -> tuple[list[dict],
             try:
                 exits.append(parse_link(line))
             except Unsupported as e:
-                skipped.append(f"{line[:40]}…: {e}")
+                skipped.append(f"{line.split('://', 1)[0]}: {e}")  # never echo link contents: they hold credentials
             except (ValueError, KeyError, binascii.Error, TypeError) as e:
-                skipped.append(f"{line[:40]}…: invalid ({e})")
+                skipped.append(f"{line.split('://', 1)[0]}: invalid ({type(e).__name__})")
     seen: set[str] = set()
     for e in exits:
         e["provider"] = provider

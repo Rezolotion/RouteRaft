@@ -16,13 +16,14 @@ import tempfile
 import threading
 from pathlib import Path
 
-GLOBAL_KINDS = ("singbox", "wireguard", "openvpn", "ikev2")  # may sit in the global slot
+GLOBAL_KINDS = ("singbox", "xray", "wireguard", "openvpn", "ikev2")  # may sit in the global slot
 RESERVED = {"global", "direct", "corp", "ovpn", "ikev2"}
-SECRET_KEYS = ("outbound", "endpoint", "ovpn_path", "ike")  # payloads that never reach the UI
+SECRET_KEYS = ("outbound", "endpoint", "ovpn_path", "ike")  # includes the Xray outbound (uuid, keys)  # payloads that never reach the UI
 
 DEFAULT_STATE = {
     "version": 2,
     "global": "",  # id of the exit used by the global slot ("" => direct)
+    "global_paused": False,  # True = the global slot is bypassed (traffic leaves directly) until resumed
     "favorites": [],  # WireGuard exits kept loaded in sing-box so switching is instant
     "exits": {},
     "providers": {  # service credentials for OpenVPN/IKEv2 profiles
@@ -56,12 +57,16 @@ DEFAULT_STATE = {
         "api_port": 9090,
         "ui_port": 8787,
         "test_url": "https://www.gstatic.com/generate_204",
+        "xray_base_port": 25000,  # loopback SOCKS ports for Xray-engine nodes (base + index)
         "vpn_iface": "rr-vpn0",  # interface the active OpenVPN global exit uses
         "stop_conflicting": ["v2raya"],
-        "rollback_seconds": 90,  # auto-disconnect unless a new config is confirmed in time
+        "rollback_seconds": 90,
+        "log_level": "info",      # sing-box log level: trace, debug, info, warn, error
+        "failover": "warn",       # "warn": only report a dead global exit; "bypass": route around it automatically
+        "health_interval": 20,    # seconds between global-exit health checks  # auto-disconnect unless a new config is confirmed in time
         "rule_sets": {
-            "geosite-ir": "https://github.com/Chocolate4U/Iran-sing-box-rules/releases/latest/download/geosite-ir.srs",
-            "geoip-ir": "https://github.com/Chocolate4U/Iran-sing-box-rules/releases/latest/download/geoip-ir.srs",
+            "geosite-ir": "https://raw.githubusercontent.com/Chocolate4U/Iran-sing-box-rules/rule-set/geosite-ir.srs",
+            "geoip-ir": "https://raw.githubusercontent.com/Chocolate4U/Iran-sing-box-rules/rule-set/geoip-ir.srs",
         },
     },
     "confirmed_config": "",  # hash of the last config the user confirmed working

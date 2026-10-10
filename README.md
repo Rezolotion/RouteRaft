@@ -31,10 +31,11 @@ Some destinations must be reached from a foreign IP, some only from a domestic o
 | WireGuard | Any `.conf` (Surfshark, Windscribe, Mullvad, self-hosted) | sing-box endpoint |
 | OpenVPN | Any `.ovpn`, UDP and TCP, per-provider credentials | supervised `openvpn` process |
 | V2Ray family | VLESS (TCP, WS, gRPC, HTTP/2, HTTPUpgrade; TLS, REALITY, XTLS Vision), VMess, Trojan, Shadowsocks (incl. obfs / v2ray-plugin) | sing-box outbound |
+| Xray-only | VLESS over **XHTTP**, **mKCP**, and **VLESS Encryption** (ML-KEM-768 / X25519, post-quantum) | supervised `xray` process, loopback SOCKS |
 | QUIC family | Hysteria, Hysteria2 (Salamander obfs, port hopping), TUIC v5, AnyTLS | sing-box outbound |
 | Plain proxies | SOCKS5, HTTP(S) | sing-box outbound |
 
-Subscription formats: base64 or plain share-link lists, Clash / Mihomo YAML, and sing-box JSON. Nodes that sing-box cannot run (for example xHTTP or mKCP transports) are skipped **and reported**, never silently dropped.
+Subscription formats: base64 or plain share-link lists, Clash / Mihomo YAML, and sing-box JSON. Nodes sing-box cannot run (XHTTP, mKCP, VLESS Encryption) are handed to Xray automatically; anything neither engine supports is skipped **and reported**, never silently dropped. Reports never echo link contents, which carry credentials.
 
 ## Features
 
@@ -49,8 +50,9 @@ Subscription formats: base64 or plain share-link lists, Clash / Mihomo YAML, and
 
 - Linux with systemd, root privileges for the daemon (TUN device, OpenVPN)
 - Python 3.11+, `python3-yaml` (only for Clash subscriptions)
-- sing-box 1.12 or newer
+- sing-box 1.12 or newer (developed and tested against 1.14)
 - `openvpn` (only if you use OpenVPN exits)
+- `xray` 25.x or newer (only if your subscriptions contain XHTTP or VLESS Encryption nodes)
 
 ## Install
 
@@ -86,14 +88,26 @@ OpenVPN profiles use *service credentials* (not your account login). Save them o
 
 sing-box cannot speak OpenVPN, so each OpenVPN exit runs as its own `openvpn` process on a fixed interface (`rr-vpn0` for the active global exit, `tun-corp` for the corporate tunnel). Profiles are started with `--route-nopull` and the pushed redirect and DNS options are ignored, so OpenVPN never touches your routing table; sing-box reaches the tunnel through a `direct` outbound bound to that interface. The VPN server's own address is excluded from the TUN, which prevents VPN-in-VPN loops.
 
+## How Xray fits
+
+Some providers now ship VLESS nodes that only Xray implements (XHTTP transport, VLESS Encryption with ML-KEM). RouteRaft runs one `xray` process that exposes each such node as a loopback SOCKS5 port (`settings.xray_base_port` + index), and sing-box treats every port as an ordinary outbound. A node therefore remains a normal selector member: switching is instant, `urltest` groups include it, and rules never know which engine carries it. Xray's own sockets bypass the TUN (`process_name` rule), which prevents routing loops. Both generated configs are validated (`sing-box check`, `xray run -test`) before anything starts.
+
 ## Development
 
 ```bash
-python3 -m unittest discover -s tests -v
-python3 -m routeraft --state-dir dev-state serve --dry-run    # never touches the network
+python3 -m unittest discover -s tests -v                       # unit tests
+python3 -m routeraft --state-dir dev-state serve --dry-run     # UI and configs only; never touches the network
+bash scripts/sandbox.sh                                        # live end-to-end suite in a throwaway container
+bash scripts/sandbox-sub.sh ~/sub.txt                          # test a real subscription (URL or links) in the sandbox
 ```
 
 `--dry-run` writes configurations and serves the UI without starting sing-box or OpenVPN.
+
+`scripts/sandbox.sh` runs the real daemon and the real sing-box inside a Docker container with its own network namespace, so the TUN device, policy rules and DNS handling exist only there and the host network is never touched. It covers connect, the auto-rollback, confirmation, live lane switching, recovery after `kill -9` of sing-box and of the daemon, the panic button, and the Xray engine against a real local VLESS + XHTTP + ML-KEM server (with a negative control that proves the traffic takes that path). It needs Docker, a local `debian:12` image and a Debian 12 host (the host's `/usr` is mounted read-only into the container).
+
+### Rule sets
+
+The domestic rule sets (`geosite-ir`, `geoip-ir`) are cached files, never fetched by sing-box at startup, because a failed download there is fatal and downloads are unreliable on filtered networks. RouteRaft tries to refresh missing sets before connecting and otherwise starts without them; explicit domain suffixes such as `.ir` keep matching. Refresh them any time with `routeraft update-rules`.
 
 ## Security model
 

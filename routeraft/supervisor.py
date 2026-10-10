@@ -7,6 +7,7 @@ import json
 import os
 import shutil
 import signal
+import socket
 import subprocess
 import threading
 import time
@@ -16,7 +17,7 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
-from . import parsers, singbox
+from . import cleanup, parsers, singbox, xray
 from .config import Store
 
 SBIN = "/usr/sbin:/sbin:/usr/local/sbin:/usr/local/bin"
@@ -28,16 +29,20 @@ def which(name: str) -> str | None:
 
 
 class Supervisor:
-    def __init__(self, store: Store, dry_run: bool = False):
-        self.store, self.dry_run = store, dry_run
+    def __init__(self, store: Store, dry_run: bool = False, keep_services: bool = False):
+        self.store, self.dry_run, self.keep_services = store, dry_run, keep_services  # keep_services: never stop conflicting services
         self.sb: subprocess.Popen | None = None
         self.vpn: subprocess.Popen | None = None      # active OpenVPN *global* exit
         self.vpn_exit: str = ""
         self.corp: subprocess.Popen | None = None     # company OpenVPN
+        self.xr: subprocess.Popen | None = None       # Xray engine (XHTTP / VLESS Encryption nodes)
         self.stopped_services: list[str] = []
         self.lock = threading.RLock()
         self.rollback_timer: threading.Timer | None = None
         self.rollback_deadline = 0.0
+        self.watch_stop = threading.Event()
+        self.health: dict = {"ok": None, "failures": 0, "ms": None, "failover": False}
+        self.event = ""  # last notable thing that happened without the user asking (crash, failover)
         self.logdir = store.dir / "logs"
         self.logdir.mkdir(exist_ok=True)
         self.rule_dir = store.dir / "rules"
@@ -49,20 +54,30 @@ class Supervisor:
         return self.store.dir / "sing-box.json"
 
     def build(self) -> dict:
-        return singbox.build(self.store.data, self.rule_dir)
+        return singbox.build(self.store.data, self.rule_dir, xray_ok=bool(which("xray")))
 
     def config_hash(self, cfg: dict) -> str:
         c = json.loads(json.dumps(cfg))
         c["experimental"]["clash_api"].pop("secret", None)
         for o in c["outbounds"]:
             o.pop("default", None)  # picking another exit must not look like a new config
-        return hashlib.sha256(json.dumps(c, sort_keys=True).encode()).hexdigest()
+        # the Xray side is part of what the user is trusting with their traffic, so it counts too
+        blob = json.dumps(c, sort_keys=True) + json.dumps(xray.build(self.store.data), sort_keys=True)
+        return hashlib.sha256(blob.encode()).hexdigest()
+
+    @property
+    def xray_path(self) -> Path:
+        return self.store.dir / "xray.json"
 
     def write_config(self) -> tuple[Path, str]:
         cfg = self.build()
         fd = os.open(self.cfg_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w") as f:
             json.dump(cfg, f, indent=2)
+        if xray.exits_of(self.store.data):
+            fd = os.open(self.xray_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w") as f:
+                json.dump(xray.build(self.store.data), f, indent=2)
         return self.cfg_path, self.config_hash(cfg)
 
     def check_config(self) -> str | None:
@@ -70,7 +85,14 @@ class Supervisor:
         if not exe:
             return None
         p = subprocess.run([exe, "check", "-c", str(self.cfg_path)], capture_output=True, text=True, cwd=self.store.dir)
-        return None if p.returncode == 0 else (p.stderr or p.stdout).strip()
+        if p.returncode != 0:
+            return (p.stderr or p.stdout).strip()
+        xr = which("xray")
+        if xr and xray.exits_of(self.store.data):  # validate the Xray side too, before anything starts
+            q = subprocess.run([xr, "run", "-test", "-c", str(self.xray_path)], capture_output=True, text=True)
+            if q.returncode != 0:
+                return "xray rejected the config:\n" + (q.stderr or q.stdout).strip()[-600:]
+        return None
 
     def _api(self, method: str, path: str, body: dict | None = None, timeout: float = 5):
         d = self.store.data
@@ -94,8 +116,10 @@ class Supervisor:
         d = self.store.data
         s = {"running": self.running(), "corp_running": self._alive(self.corp), "vpn_running": self._alive(self.vpn),
              "singbox_installed": bool(which("sing-box")), "openvpn_installed": bool(which("openvpn")),
+             "xray_installed": bool(which("xray")), "xray_running": self._alive(self.xr),
              "dry_run": self.dry_run, "selected": d["global"],
-             "rollback_in": max(0, int(self.rollback_deadline - time.time())) if self.rollback_timer else 0}
+             "rollback_in": max(0, int(self.rollback_deadline - time.time())) if self.rollback_timer else 0,
+             "health": self.health, "event": self.event, "rule_sets": self.rule_set_status()}
         return s
 
     # ---------------------------------------------------------- rollback
@@ -134,6 +158,10 @@ class Supervisor:
         with self.lock:
             if self.running():
                 return {"ok": True, "note": "already running"}
+            missing = [t for t, cached in self.rule_set_status().items() if not cached]
+            if missing and not self.dry_run:
+                self.update_rules(timeout=10)  # best effort, on the normal network, before the tunnel exists
+                missing = [t for t, cached in self.rule_set_status().items() if not cached]
             _, h = self.write_config()
             err = self.check_config()
             if err:
@@ -145,23 +173,30 @@ class Supervisor:
                 return {"ok": False, "error": "sing-box is not installed (packaging/install-singbox.sh)"}
             if os.geteuid() != 0:
                 return {"ok": False, "error": "need root to create the TUN device (run the daemon as a service)"}
-            for svc in self.store.data["settings"]["stop_conflicting"]:
-                if subprocess.run(["systemctl", "is-active", "--quiet", svc]).returncode == 0:
-                    subprocess.run(["systemctl", "stop", svc])
+            for svc in ([] if self.keep_services else self.store.data["settings"]["stop_conflicting"]):
+                if self._systemctl("is-active", "--quiet", svc) == 0:
+                    self._systemctl("stop", svc)
                     self.stopped_services.append(svc)
-            warn = ""
+            cleanup.record_stopped(self.store.dir, self.stopped_services)
+            warn = (f"Rule sets not cached ({', '.join(missing)}); only explicit domains and ranges are matched. "
+                    "Use Update rule sets in Routing.") if missing else ""
             if self.store.data["corp"]["enabled"]:
                 r = self.corp_up()
-                warn = "" if r["ok"] else f"company VPN: {r['error']}"
+                warn = (warn + " " if warn else "") + ("" if r["ok"] else f"company VPN: {r['error']}")
             g = self.store.data["exits"].get(self.store.data["global"])
             if g and g["kind"] == "openvpn":
                 r = self._vpn_up(g)
                 if not r["ok"]:
                     self._restore_services()
                     return r
+            if xray.exits_of(self.store.data):
+                r = self._xray_up()
+                if not r["ok"]:
+                    warn = (warn + " " if warn else "") + r["error"]
             log = open(self.logdir / "sing-box.log", "ab")
             self.sb = subprocess.Popen([exe, "run", "-c", str(self.cfg_path)], cwd=self.store.dir,
                                        stdout=log, stderr=log, start_new_session=True)
+            cleanup.record_pid(self.store.dir, "sing-box", self.sb.pid)
             for _ in range(60):  # wait for the API
                 time.sleep(0.25)
                 if self.sb.poll() is not None:
@@ -171,26 +206,67 @@ class Supervisor:
                     self._api("GET", "/version")
                     self._select(singbox.member_for(self.store.data, self.store.data["global"]))
                     self._arm(h)
+                    self._start_watchdog()
                     return {"ok": True, "note": warn, "rollback": bool(self.rollback_timer)}
                 except NET_ERRORS:
                     continue
             self.disconnect()
             return {"ok": False, "error": "sing-box started but its API never answered; see logs"}
 
+    @staticmethod
+    def _systemctl(*args: str) -> int | None:
+        """Return systemctl's exit code, or None where systemd is not available (containers, non-systemd distros)."""
+        try:
+            return subprocess.run(["systemctl", *args], capture_output=True).returncode
+        except OSError:
+            return None
+
     def _restore_services(self) -> None:
-        for svc in self.stopped_services:  # give back what we took
-            subprocess.run(["systemctl", "start", svc])
+        if not self.dry_run:  # give back what we took
+            cleanup.restore_services(self.store.dir)
         self.stopped_services = []
+
+    def _ifaces(self) -> list[str]:
+        st, corp = self.store.data["settings"], self.store.data["corp"]
+        return [st["tun_name"], st["vpn_iface"], corp["interface"], singbox.IKE_IFACE]
+
+    def _can_touch_network(self) -> bool:
+        return not self.dry_run and os.geteuid() == 0
 
     def disconnect(self) -> dict:
         with self.lock:
             self._disarm()
+            self.watch_stop.set()
             self._terminate(self.sb)
             self.sb = None
             self._vpn_down()
+            self._xray_down()
             self.corp_down()
+            if self._can_touch_network():
+                cleanup.clean_network(self._ifaces())  # idempotent: a no-op after a clean exit
+            for key in ("sing-box", "openvpn-global", "openvpn-corp", "xray"):
+                cleanup.forget_pid(self.store.dir, key)
             self._restore_services()
+            self.health = {"ok": None, "failures": 0, "ms": None, "failover": False}
         return {"ok": True}
+
+    def panic(self) -> dict:
+        """Restore normal internet no matter what state we are in, including after a crash."""
+        with self.lock:
+            # Order matters: after a daemon crash this process owns no Popen handles, so the PID book is the only
+            # way to find the orphaned sing-box/openvpn. disconnect() forgets those PIDs, so use them first.
+            early = cleanup.kill_leftovers(self.store.dir) if self._can_touch_network() else []
+            self.disconnect()
+            self.event = ""
+            extra = cleanup.panic(self.store.dir, self._ifaces()) if self._can_touch_network() else {}
+            if early:
+                extra["killed"] = early + extra.get("killed", [])
+        return {"ok": True, **extra}
+
+    def startup_cleanup(self) -> None:
+        """Called once when the daemon starts: remove anything a previous run left behind."""
+        if self._can_touch_network():
+            cleanup.panic(self.store.dir, self._ifaces())
 
     def _select(self, member: str) -> None:
         self._api("PUT", "/proxies/global", {"name": member})
@@ -219,6 +295,65 @@ class Supervisor:
             if not exit_ or exit_["kind"] != "openvpn":
                 self._vpn_down()
             return {"ok": True}
+
+    def set_lane(self, lane: str, paused: bool) -> dict:
+        """Flip one lane between its target and a plain bypass, live, without touching anything else."""
+        with self.lock:
+            d = self.store.data
+            if lane == "global":
+                d["global_paused"] = bool(paused)
+                tag = "global"
+                member = "direct" if paused or not d["global"] else singbox.member_for(d, d["global"])
+            else:
+                r = next((x for x in d["routes"] if x["id"] == lane), None)
+                if r is None:
+                    return {"ok": False, "error": f"unknown lane {lane}"}
+                r["paused"] = bool(paused)
+                tag = singbox.rule_tag(lane)
+                member = "direct" if paused else self._selector_target(tag)
+            self.store.save()
+            if not self.running() or not member:
+                return {"ok": True}
+            try:
+                self._api("PUT", f"/proxies/{urllib.parse.quote(tag, safe='')}", {"name": member})
+            except NET_ERRORS as e:
+                return {"ok": False, "error": f"clash api: {e}"}
+            return {"ok": True}
+
+    def _selector_target(self, tag: str) -> str:
+        """First member of a rule selector in the running config = the rule's real target."""
+        try:
+            cfg = json.loads(self.cfg_path.read_text())
+        except (OSError, ValueError):
+            return ""
+        return next((o["outbounds"][0] for o in cfg["outbounds"] if o["tag"] == tag), "")
+
+    def _start_watchdog(self) -> None:
+        self.watch_stop.set()  # retire the previous watchdog (apply() restarts sing-box without a disconnect)
+        self.watch_stop = stop = threading.Event()
+        threading.Thread(target=self._watch, args=(stop,), daemon=True, name="routeraft-watchdog").start()
+
+    def _watch(self, stop: threading.Event) -> None:
+        """Detect a dead sing-box (clean up) or a dead global exit (warn, or bypass if configured)."""
+        while not stop.wait(self.store.data["settings"]["health_interval"]):
+            if self.sb is not None and self.sb.poll() is not None:
+                self.event = "sing-box stopped unexpectedly. Normal networking has been restored."
+                self.disconnect()
+                return
+            d = self.store.data
+            if not self.running() or d["global_paused"] or not d["global"]:
+                self.health.update(ok=None, failures=0, ms=None)
+                continue
+            r = self.delay("global")  # a selector's delay is the delay of whatever it currently selects
+            if r.get("ok") and r.get("ms"):
+                self.health.update(ok=True, failures=0, ms=r["ms"], failover=False)
+                continue
+            self.health["failures"] += 1
+            self.health.update(ok=False, ms=None)
+            if self.health["failures"] >= 3 and d["settings"]["failover"] == "bypass" and not self.health["failover"]:
+                self.set_lane("global", True)
+                self.health["failover"] = True
+                self.event = "The global exit stopped responding. Traffic is bypassing the tunnel until you resume it."
 
     def _wg_loaded_in_running(self, exit_id: str) -> bool:
         try:
@@ -309,15 +444,46 @@ class Supervisor:
         iface = self.store.data["settings"]["vpn_iface"]
         log = open(self.logdir / "openvpn-global.log", "ab")
         self.vpn = subprocess.Popen(self._ovpn_cmd(exit_, iface, auth), stdout=log, stderr=log, start_new_session=True)
+        cleanup.record_pid(self.store.dir, "openvpn-global", self.vpn.pid)
         self.vpn_exit = exit_["id"]
         r = self._wait_iface(self.vpn, iface)
         if not r["ok"]:
             self._vpn_down()
         return r
 
+    def _xray_up(self) -> dict:
+        """(Re)start Xray with the current node list. Cheap: outbounds connect lazily, on first use."""
+        self._xray_down()
+        exe = which("xray")
+        if not exe:
+            n = len(xray.exits_of(self.store.data))
+            return {"ok": False, "error": f"{n} node(s) need Xray, which is not installed; they are unavailable."}
+        if self.dry_run:
+            return {"ok": True}
+        log = open(self.logdir / "xray.log", "ab")
+        self.xr = subprocess.Popen([exe, "run", "-c", str(self.xray_path)], stdout=log, stderr=log, start_new_session=True)
+        cleanup.record_pid(self.store.dir, "xray", self.xr.pid)
+        first = xray.port_for(self.store.data, xray.exits_of(self.store.data)[0])
+        for _ in range(40):  # wait until the first loopback port accepts connections
+            time.sleep(0.25)
+            if self.xr.poll() is not None:
+                return {"ok": False, "error": "xray exited; see the xray log"}
+            try:
+                socket.create_connection((xray.LISTEN, first), timeout=0.5).close()
+                return {"ok": True}
+            except OSError:
+                continue
+        return {"ok": False, "error": "xray did not open its ports in 10s; see the xray log"}
+
+    def _xray_down(self) -> None:
+        self._terminate(self.xr)
+        self.xr = None
+        cleanup.forget_pid(self.store.dir, "xray")
+
     def _vpn_down(self) -> None:
         self._terminate(self.vpn)
         self.vpn, self.vpn_exit = None, ""
+        cleanup.forget_pid(self.store.dir, "openvpn-global")
 
     def corp_up(self) -> dict:
         c = self.store.data["corp"]
@@ -331,6 +497,7 @@ class Supervisor:
         log = open(self.logdir / "openvpn-corp.log", "ab")
         self.corp = subprocess.Popen(self._ovpn_cmd({"ovpn_path": c["ovpn_path"]}, c["interface"], auth),
                                      stdout=log, stderr=log, start_new_session=True)
+        cleanup.record_pid(self.store.dir, "openvpn-corp", self.corp.pid)
         r = self._wait_iface(self.corp, c["interface"])
         if not r["ok"]:
             self.corp_down()
@@ -339,6 +506,7 @@ class Supervisor:
     def corp_down(self) -> dict:
         self._terminate(self.corp)
         self.corp = None
+        cleanup.forget_pid(self.store.dir, "openvpn-corp")
         return {"ok": True}
 
     # ------------------------------------------------------------ imports
@@ -412,19 +580,34 @@ class Supervisor:
         return {"ok": r["ok"], "added": len(exits), "skipped": skipped[:20], "skipped_count": len(skipped),
                 **({"error": r["error"]} if not r["ok"] else {})}
 
-    def update_rules(self) -> dict:
+    def used_rule_sets(self) -> list[str]:
+        return sorted({t for r in self.store.data["routes"] if r["enabled"] for t in r["rule_set"]
+                       if t in self.store.data["settings"]["rule_sets"]})
+
+    def rule_set_status(self) -> dict[str, bool]:
+        """tag -> is the file cached locally (and therefore usable by sing-box)."""
+        return {t: (self.rule_dir / f"{t}.srs").exists() and (self.rule_dir / f"{t}.srs").stat().st_size > 0
+                for t in self.used_rule_sets()}
+
+    def update_rules(self, timeout: float = 30) -> dict:
+        """Download the rule sets into the cache. Files are replaced atomically; a failed fetch keeps the old copy."""
         out = {}
         for tag, url in self.store.data["settings"]["rule_sets"].items():
             try:
-                with urllib.request.urlopen(url, timeout=30) as r:
-                    (self.rule_dir / f"{tag}.srs").write_bytes(r.read())
-                out[tag] = "ok"
+                with urllib.request.urlopen(url, timeout=timeout) as r:
+                    data = r.read()
+                if not data:
+                    raise ValueError("empty response")
+                tmp = self.rule_dir / f".{tag}.part"
+                tmp.write_bytes(data)
+                os.replace(tmp, self.rule_dir / f"{tag}.srs")
+                out[tag] = f"ok ({len(data)} bytes)"
             except NET_ERRORS as e:
                 out[tag] = f"failed: {e}"
         return out
 
     def logs(self, name: str = "sing-box", lines: int = 200) -> str:
-        p = self.logdir / {"corp": "openvpn-corp.log", "vpn": "openvpn-global.log"}.get(name, "sing-box.log")
+        p = self.logdir / {"corp": "openvpn-corp.log", "vpn": "openvpn-global.log", "xray": "xray.log"}.get(name, "sing-box.log")
         return "\n".join(p.read_text(errors="replace").splitlines()[-lines:]) if p.exists() else ""
 
     @staticmethod
